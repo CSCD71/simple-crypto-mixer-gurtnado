@@ -32,6 +32,8 @@ contract Mixer {
 
     function deposit(uint256 commitment) payable public {
         // note: check that 0.1 ETH was sent?
+        require(msg.value == 0.1 ether, "Must send exactly 0.1 ETH");
+        emit CommitmentDeposited(bytes32(commitment));
         insertLeaf(commitment);
     }
 
