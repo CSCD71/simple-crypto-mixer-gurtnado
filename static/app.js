@@ -19,6 +19,7 @@ const TREE_DEPTH = 20;
 const WASM_PATH = "zk-data/ProofOfMembership_js/ProofOfMembership.wasm";
 const ZKEY_PATH = "zk-data/ProofOfMembership.zkey";
 const VKEY_PATH = "zk-data/ProofOfMembership.vkey";
+const p = BigInt('21888242871839275222246405745257275088548364400416034343698204186575808495617');
 
 // ---------------------------------------------------------------------------
 // Sourced from https://github.com/prifilabs/zk-toolbox/blob/master/src/Utils.ts
@@ -95,7 +96,7 @@ function getMerkleProof(levels, leafIndex, zeros) {
 // ---------------------------------------------------------------------------
 // Proof generation & encoding (using snarkjs loaded globally from CDN)
 // ---------------------------------------------------------------------------
-async function generateZkProof(secret, nullifier, nonce, commitments) {
+export async function generateZkProof(secret, nullifier, nonce, commitments) {
   // Build the Merkle tree from on-chain commitments
   const commitment = poseidon2([secret, nullifier]);
   const leafIndex = commitments.findIndex((c) => c === commitment);
