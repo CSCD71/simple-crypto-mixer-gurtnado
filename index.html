@@ -1,0 +1,149 @@
+<!doctype html>
+<!-- UI built with the assistance of AI tools -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GurtNado</title>
+    <link rel="stylesheet" href="static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">Gurt</div>
+        <div class="brand-text">
+          <h1>GurtNado</h1>
+        </div>
+      </div>
+      <div class="wallet">
+        <div class="wallet-row">
+          <select id="networkSelect" class="select"></select>
+          <button id="connectButton" class="btn">Connect Wallet</button>
+        </div>
+        <div id="walletStatus" class="status" aria-live="polite"></div>
+      </div>
+    </header>
+
+    <main class="content">
+      <div id="contractLink" class="contract-link" hidden>
+        Mixer contract deployed on
+        <a id="contractLinkUrl" href="#" target="_blank" rel="noreferrer"></a>
+      </div>
+
+      <section id="walletGate" class="wallet-gate" hidden>
+        <div class="wallet-gate-card">
+          <h2>Connect your wallet first</h2>
+          <p>Please connect your MetaMask wallet to deposit or withdraw funds through the mixer.</p>
+        </div>
+      </section>
+
+      <!-- Tab Navigation -->
+      <nav class="tabs-nav">
+        <button class="tab-btn active" data-tab="deposit">Deposit</button>
+        <button class="tab-btn" data-tab="withdraw">Withdraw</button>
+      </nav>
+
+      <!-- Deposit Tab Content -->
+      <section class="tab-panel panel active" data-tab="deposit" id="depositPanel">
+        <div class="panel-head">
+          <h2>Deposit 0.1 ETH</h2>
+        </div>
+        <div id="depositMessage" class="message" role="status"></div>
+
+        <form id="depositForm" class="form">
+          <p style="color:var(--muted);font-size:14px;margin:0;">
+            Generate a secret and nullifier, then deposit exactly 0.1 ETH into the mixer.
+            <strong>Save the secret note</strong> — you will need it to withdraw later.
+          </p>
+          <div class="field">
+            <span>Secret</span>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input id="depositSecret" type="text" readonly style="flex:1;" placeholder="Click Generate to create" />
+            </div>
+          </div>
+          <div class="field">
+            <span>Nullifier</span>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input id="depositNullifier" type="text" readonly style="flex:1;" placeholder="Click Generate to create" />
+            </div>
+          </div>
+          <div class="field">
+            <span>Commitment (Poseidon hash)</span>
+            <input id="depositCommitment" type="text" readonly placeholder="Auto-computed from secret & nullifier" />
+          </div>
+          <div class="form-actions" style="gap:12px;">
+            <button type="button" id="generateSecretsBtn" class="btn ghost">Generate Secrets</button>
+            <button type="submit" class="btn">Deposit 0.1 ETH</button>
+          </div>
+        </form>
+
+        <!-- Secret Note Display -->
+        <div id="secretNoteSection" hidden style="margin-top:20px;">
+          <div class="form" style="border-color:var(--accent);">
+            <div class="panel-head">
+              <h3 style="margin:0;color:var(--accent);">Your Secret Note</h3>
+            </div>
+            <p style="color:var(--muted);font-size:13px;margin:4px 0;">
+              Save this note securely. You will need it to withdraw your 0.1 ETH.
+              <strong>Do not share it with anyone.</strong> Anyone with this note can withdraw your deposit.
+            </p>
+            <textarea id="secretNoteText" readonly rows="4" style="width:100%;background:#0f131c;color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-family:monospace;font-size:13px;resize:vertical;"></textarea>
+            <div class="form-actions" style="gap:12px;">
+              <button type="button" id="copyNoteBtn" class="btn ghost">Copy to Clipboard</button>
+              <button type="button" id="downloadNoteBtn" class="btn ghost">Download Note</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Withdraw Tab Content -->
+      <section class="tab-panel panel" data-tab="withdraw" id="withdrawPanel">
+        <div class="panel-head">
+          <h2>Withdraw 0.1 ETH</h2>
+        </div>
+        <div id="withdrawMessage" class="message" role="status"></div>
+
+        <form id="withdrawForm" class="form">
+          <p style="color:var(--muted);font-size:14px;margin:0;">
+            Provide your secret note (or paste secret &amp; nullifier manually) to generate a ZK proof and withdraw 0.1 ETH to any address.
+          </p>
+          <div class="field">
+            <span>Import Secret Note</span>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              <textarea id="withdrawNoteInput" rows="3" placeholder="Paste your secret note JSON here..." style="flex:1;min-width:200px;background:#0f131c;color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-family:monospace;font-size:13px;resize:vertical;"></textarea>
+              <button type="button" id="parseNoteBtn" class="btn ghost">Parse Note</button>
+            </div>
+          </div>
+          <div class="field">
+            <span>Secret</span>
+            <input id="withdrawSecret" type="text" placeholder="Your secret value" required />
+          </div>
+          <div class="field">
+            <span>Nullifier</span>
+            <input id="withdrawNullifier" type="text" placeholder="Your nullifier value" required />
+          </div>
+          <div class="field">
+            <span>Recipient Address</span>
+            <input id="withdrawRecipient" type="text" placeholder="0x... address to receive 0.1 ETH" required />
+          </div>
+          <div id="proofStatus" class="message" role="status" hidden></div>
+          <div class="form-actions">
+            <button type="submit" class="btn">Generate Proof &amp; Withdraw</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <div id="txModal" class="modal" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>Transaction Confirmed</h3>
+          <button id="closeModal" class="btn ghost">Close</button>
+        </div>
+        <div id="txBody" class="modal-body"></div>
+      </div>
+    </div>
+
+    <script type="module" src="static/app.js"></script>
+  </body>
+</html>
