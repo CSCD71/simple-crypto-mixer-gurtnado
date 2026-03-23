@@ -7,6 +7,16 @@ import { createPublicClient, createWalletClient, http, parseEther, decodeEventLo
 import { privateKeyToAccount } from "viem/accounts";
 import { foundry } from "viem/chains";
 
+import { proxy, PoseidonT6 } from 'poseidon-solidity';
+
+import { IncrementalMerkleTree } from "@zk-kit/incremental-merkle-tree";
+import { poseidon, poseidon_gencontract as poseidonContract } from "circomlibjs";
+import { Contract } from "ethers";
+
+import { poseidon2 } from 'poseidon-lite';
+
+import { groth16 } from 'snarkjs';
+
 const rpc = http("http://127.0.0.1:8545");
 const client = await createPublicClient({ chain: foundry, transport: rpc });
 
@@ -23,16 +33,38 @@ const privateKeys = [
     "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
 ];
 
-function loadContract(contract) {
+const secret = BigInt('6767676767676767676767676767676767676767676767676767676767676767676767676767');
+const nullifier = BigInt('2121212121212121212121212121212121212121212121212121212121212121212121212121');
+const commitment = poseidon2([secret, nullifier]);
+
+function loadContract(contract, libraries={}) {
   const content = readFileSync(join('out', `${contract}.sol`, `${contract}.json`), "utf8");
   const artifact = JSON.parse(content);
-  return { abi: artifact.abi, bytecode: artifact.bytecode.object };
+  const abi = artifact.abi;
+  let bytecode = artifact.bytecode.object;
+  const substitutions = {};
+  const references = Object.assign({}, ...Object.values(artifact.bytecode.linkReferences))
+  for (let reference in references){
+      if (!(reference in libraries)) throw new Error(`Undefined address for library ${reference}`);
+      const instance = references[reference][0];
+      const from = instance.start*2 + 2;
+      const to = from + instance.length * 2;
+      const placeholder = bytecode.slice(from, to);
+      substitutions[placeholder] = libraries[reference].slice(2).toLowerCase();
+  }
+  for (let substitution in substitutions){
+      bytecode = bytecode.replaceAll(substitution, substitutions[substitution]);
+  }
+  return { abi, bytecode };
 }
 
 describe("Mixer", function () {
-    let depositor, withdrawer,
-        contract;
-    
+
+    let depositor, withdrawer // wallets
+    let contract;
+
+    const receipts = [];
+
     afterAll(async () =>{
         if (receipts.length === 0) return;
 
@@ -46,48 +78,75 @@ describe("Mixer", function () {
     });
 
     beforeAll(async () => {
-        // create wallets
-        [,,depositor, withdrawer] = await Promise.all(privateKeys.map(function(pk){
+
+        // Create Accounts
+        [depositor, withdrawer] = await Promise.all(privateKeys.map(function(pk){
             return createWalletClient({ chain: foundry, transport: rpc , account: privateKeyToAccount(pk) });
         })); 
-        // compile the contract
-        const { abi, bytecode } = loadContract("Exchange");        
-        // deploy contract
-        const hash = await seller1.deployContract({
-            abi,
-            bytecode,
-            args: []
-        });
-        // wait for the transaction to be confirmed
+
+        // Deploy Verifier
+        const hash = await depositor.deployContract(loadContract("ProofOfMembershipVerifier"));
         const receipt = await client.waitForTransactionReceipt({ hash });
-        receipts.push({label: "Deployment", receipt});
-        const block = await client.getBlock({ blockNumber: receipt.blockNumber });
-        currentTime = BigInt(block.timestamp);
-        const address = receipt.contractAddress;
-        contract = {address, abi};
+        receipts.push({label: "Verifier Deployment", receipt});
+        const verifierAddress = receipt.contractAddress;
+        
+        // Deploy Poseidon T6 contract if needed
+        const hasherCode = await client.getBytecode({ address: PoseidonT6.address })
+        if (!hasherCode) {
+            const hash2 = await depositor.sendTransaction({to: proxy.address, data: PoseidonT6.data})
+            await client.waitForTransactionReceipt({ hash: hash2 });
+        }
+       
+        // Deploy IncrementalBinaryTree contract?
+        // Docs here but for Hardhat...
+        // https://www.npmjs.com/package/@zk-kit/incremental-merkle-tree.sol
+
+        // Deploy Mixer linked with the PoseidonT6 library
+        const { abi, bytecode } = loadContract("Mixer", { PoseidonT6: PoseidonT6.address });
+        const hash3 = await depositor.deployContract({ abi, bytecode, args: [verifierAddress] });
+        const receipt3 = await client.waitForTransactionReceipt({ hash:hash3 });
+        receipts.push({label: "Wallet Deployment", receipt: receipt3});
+        const address = receipt3.contractAddress;
+        contract = { address, abi };
     });
 
     describe("Deposit", function () {
         it("Should allow deposits of exactly 0.1 ETH", async function () {
-            //todo
+            const { address, abi } = contract;
+            const hash = await depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.1") });
+            let receipt = await client.waitForTransactionReceipt({ hash });
+            receipts.push({label: "Deposit", receipt});
+            // Check that the correct event was emitted
+            expect(receipt.logs).toHaveLength(1);
+            const log = receipt.logs[0];
+            const { args, eventName } = decodeEventLog({abi, data: log.data, topics: log.topics });
+            expect(eventName).to.equal('CommittmentDeposited');
+            expect(args.committment).to.equal(commitment);
         });
         it("Should not allow deposits of less than 0.1 ETH", async function () {
-            //todo
+            const { address, abi } = contract;
+            const request = await depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.05") });
+            await expect(request).rejects.toThrow("Must send exactly 0.1 ETH");
         });
         it("Should not allow deposits of more than 0.1 ETH", async function () {
-            //todo
+            const { address, abi } = contract;
+            const request = await depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.15") });
+            await expect(request).rejects.toThrow("Must send exactly 0.1 ETH");
         });
     });
 
     describe("Withdraw", function () {
         it("Should allow withdrawal", async function () {
             //todo
+            expect(true);
         });
         it("Should not allow withdrawal with improper secret", async function () {
             //todo
+            expect(true);
         });
         it("Should not allow withdrawal of duplicate nullifiers", async function () {
             //todo
+            expect(true);
         });
     });
 });
