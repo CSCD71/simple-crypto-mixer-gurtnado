@@ -17,7 +17,7 @@ contract Mixer {
 
     // Emitted when a commitment is deposited to the contract
     event CommitmentDeposited(
-      bytes commitment
+      uint256 commitment
     );
 	
     constructor(ProofOfMembershipVerifier _verifier) {
@@ -31,9 +31,8 @@ contract Mixer {
     }
 
     function deposit(uint256 commitment) payable public {
-        // note: check that 0.1 ETH was sent?
         require(msg.value == 0.1 ether, "Must send exactly 0.1 ETH");
-        emit CommitmentDeposited(bytes32(commitment));
+        emit CommitmentDeposited(commitment);
         insertLeaf(commitment);
     }
 
