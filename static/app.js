@@ -9,6 +9,7 @@ import {
 } from "https://esm.sh/viem@2.19.4";
 import * as chains from "https://esm.sh/viem@2.19.4/chains";
 import { poseidon2 } from "https://esm.sh/poseidon-lite@0.3.0";
+import { randomBytes } from '@noble/ciphers/webcrypto';
 
 // ---------------------------------------------------------------------------
 // ZK constants & helpers (browser-compatible replacements for @prifilabs/zk-toolbox)
@@ -19,14 +20,15 @@ const WASM_PATH = "zk-data/ProofOfMembership_js/ProofOfMembership.wasm";
 const ZKEY_PATH = "zk-data/ProofOfMembership.zkey";
 const VKEY_PATH = "zk-data/ProofOfMembership.vkey";
 
+// ---------------------------------------------------------------------------
+// Sourced from https://github.com/prifilabs/zk-toolbox/blob/master/src/Utils.ts
+// ---------------------------------------------------------------------------
 function randomBigInt32ModP() {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let val = 0n;
-  for (let i = 0; i < 32; i++) {
-    val = (val << 8n) | BigInt(bytes[i]);
-  }
-  return val % SNARK_FIELD_SIZE;
+  const bytes = randomBytes(32)
+  const hex = Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return BigInt('0x' + hex) % p;
 }
 
 // ---------------------------------------------------------------------------
