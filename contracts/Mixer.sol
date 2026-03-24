@@ -3,7 +3,7 @@ pragma solidity ^0.8.32;
 
 import { PoseidonT6 } from "poseidon-solidity/PoseidonT6.sol";
 import { ProofOfMembershipVerifier } from "./ProofOfMembershipVerifier.sol";
-import "@zk-kit/incremental-merkle-tree.sol/IncrementalBinaryTree.sol";
+import { IncrementalBinaryTree, IncrementalTreeData } from "./IncrementalBinaryTree.sol";
 
 contract Mixer {
     using IncrementalBinaryTree for IncrementalTreeData;

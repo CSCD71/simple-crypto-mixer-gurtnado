@@ -7,11 +7,11 @@ import { createPublicClient, createWalletClient, http, parseEther, decodeEventLo
 import { privateKeyToAccount } from "viem/accounts";
 import { foundry } from "viem/chains";
 
-import { proxy, PoseidonT6 } from 'poseidon-solidity';
+import { proxy, PoseidonT6, PoseidonT3 } from 'poseidon-solidity';
 
 import { IncrementalMerkleTree } from "@zk-kit/incremental-merkle-tree";
-import { poseidon, poseidon_gencontract as poseidonContract } from "circomlibjs";
-import { Contract } from "ethers";
+import { poseidon } from "circomlibjs";
+import { Contract, ethers } from "ethers";
 
 import { poseidon2 } from 'poseidon-lite';
 
@@ -203,18 +203,28 @@ describe("Mixer", function () {
             const hash2 = await depositor.sendTransaction({to: proxy.address, data: PoseidonT6.data})
             await client.waitForTransactionReceipt({ hash: hash2 });
         }
-       
-        // Deploy IncrementalBinaryTree contract?
-        // Docs here but for Hardhat...
-        // https://www.npmjs.com/package/@zk-kit/incremental-merkle-tree.sol
 
-        // Deploy Mixer linked with the PoseidonT6 library
-        const { abi, bytecode } = loadContract("Mixer", { PoseidonT6: PoseidonT6.address });
-        const hash3 = await depositor.deployContract({ abi, bytecode, args: [verifierAddress] });
-        const receipt3 = await client.waitForTransactionReceipt({ hash:hash3 });
-        receipts.push({label: "Wallet Deployment", receipt: receipt3});
-        const address = receipt3.contractAddress;
-        contract = { address, abi };
+       // Deploy Poseidon T3 contract if needed
+        const hasherCode2 = await client.getBytecode({ address: PoseidonT3.address })
+        if (!hasherCode2) {
+            const hash3 = await depositor.sendTransaction({to: proxy.address, data: PoseidonT3.data})
+            await client.waitForTransactionReceipt({ hash: hash3 });
+        }
+
+        // Deploy IncrementalBinaryTree contract
+        const { abi: abi, bytecode: bytecode } = loadContract("IncrementalBinaryTree", { PoseidonT3: PoseidonT3.address });
+        const hash4 = await depositor.deployContract({ abi: abi, bytecode: bytecode });
+        const receipt4 = await client.waitForTransactionReceipt({ hash: hash4 });
+        receipts.push({label: "IncrementalBinaryTree Deployment", receipt: receipt4});
+        const address = receipt4.contractAddress;
+
+        // Deploy Mixer linked with PoseidonT6 & IncrementalBinaryTree
+        const { abi: abi2, bytecode: bytecode2 } = loadContract("Mixer", { PoseidonT6: PoseidonT6.address, IncrementalBinaryTree: address });
+        const hash5 = await depositor.deployContract({ abi: abi2, bytecode: bytecode2, args: [verifierAddress] });
+        const receipt5 = await client.waitForTransactionReceipt({ hash: hash5 });
+        receipts.push({label: "Wallet Deployment", receipt: receipt5});
+        const address2 = receipt5.contractAddress;
+        contract = { address: address2, abi: abi2 };
     });
 
     describe("Deposit", function () {
@@ -233,12 +243,12 @@ describe("Mixer", function () {
         });
         it("Should not allow deposits of less than 0.1 ETH", async function () {
             const { address, abi } = contract;
-            const request = await depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.05") });
+            const request = depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.05") });
             await expect(request).rejects.toThrow("Must send exactly 0.1 ETH");
         });
         it("Should not allow deposits of more than 0.1 ETH", async function () {
             const { address, abi } = contract;
-            const request = await depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.15") });
+            const request = depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.15") });
             await expect(request).rejects.toThrow("Must send exactly 0.1 ETH");
         });
     });
@@ -345,7 +355,7 @@ describe("Mixer", function () {
             });
 
             const proofBytes = encodeProofForContract(proof, publicSignals);
-            const request = await withdrawer.writeContract({
+            const request = withdrawer.writeContract({
                 address,
                 abi,
                 functionName: "withdraw",
