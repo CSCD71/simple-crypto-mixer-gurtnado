@@ -96,7 +96,7 @@ function getMerkleProof(levels, leafIndex, zeros) {
 // ---------------------------------------------------------------------------
 // Proof generation & encoding (using snarkjs loaded globally from CDN)
 // ---------------------------------------------------------------------------
-export async function generateZkProof(secret, nullifier, nonce, commitments) {
+export async function generateZkProof(secret, nullifier, nonce, commitments, chainId, mixerAddress, recipientAddress) {
   // Build the Merkle tree from on-chain commitments
   const commitment = poseidon2([secret, nullifier]);
   const leafIndex = commitments.findIndex((c) => c === commitment);
@@ -112,6 +112,9 @@ export async function generateZkProof(secret, nullifier, nonce, commitments) {
     pathIndices: pathIndices.map((p) => p.toString()),
     nullifier: nullifier.toString(),
     nonce: nonce.toString(),
+    chainId: BigInt(chainId).toString(),
+    mixer: BigInt(mixerAddress).toString(),
+    to: BigInt(recipientAddress).toString(),
   };
 
   // Generate Groth16 proof via snarkjs (loaded as global from CDN)
@@ -144,7 +147,7 @@ function encodeProofForContract(proof, publicSignals) {
       { type: "uint256[2]", name: "pA" },
       { type: "uint256[2][2]", name: "pB" },
       { type: "uint256[2]", name: "pC" },
-      { type: "uint256[4]", name: "pubSignals" },
+      { type: "uint256[7]", name: "pubSignals" },
     ],
     [pA, pB, pC, signals]
   );
@@ -180,7 +183,7 @@ const ABI_WITHDRAW = [
 ];
 
 const ABI_COMMITMENT_EVENT = parseAbiItem(
-  "event CommitmentDeposited(bytes commitment)"
+  "event CommitmentDeposited(uint256 commitment)"
 );
 
 // ---------------------------------------------------------------------------
@@ -432,7 +435,7 @@ async function fetchCommitments(contractAddress, fromBlock) {
     fromBlock: BigInt(fromBlock),
     toBlock: "latest"
   });
-  // Each log.args.commitment is a bytes-encoded uint256 commitment
+  // Each log.args.commitment is a uint256 commitment
   return logs.map((log) => BigInt(log.args.commitment));
 }
 
@@ -708,7 +711,15 @@ withdrawForm?.addEventListener("submit", async (event) => {
     const nonce = randomBigInt32ModP();
 
     // Step 3: Generate the proof using snarkjs + local Merkle tree (browser-compatible)
-    const { proof, publicSignals } = await generateZkProof(secret, nullifier, nonce, commitments);
+    const { proof, publicSignals } = await generateZkProof(
+      secret,
+      nullifier,
+      nonce,
+      commitments,
+      currentChainId,
+      chainConfig.address,
+      recipient
+    );
 
     // Step 3.5: Verify the proof locally (optional sanity check)
     setProofStatus("Verifying proof locally...", true);
