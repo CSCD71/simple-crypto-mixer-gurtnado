@@ -13,6 +13,9 @@ template ProofOfMembership(levels) {
     // public inputs
     signal input nullifier;
     signal input nonce;
+    signal input chainId;
+    signal input mixer;
+    signal input to;
     
     // public outputs
     signal output root;
@@ -33,9 +36,9 @@ template ProofOfMembership(levels) {
     root <== tree.root;
     
     // context binding
-    component authHasher = Poseidon(3);
-    authHasher.inputs <== [secret, nullifier, nonce];
+    component authHasher = Poseidon(6);
+    authHasher.inputs <== [secret, nullifier, nonce, chainId, mixer, to];
     authHash <== authHasher.out;
 }
 
-component main {public [nullifier, nonce]} = ProofOfMembership(20);
+component main {public [nullifier, nonce, chainId, mixer, to]} = ProofOfMembership(20);
