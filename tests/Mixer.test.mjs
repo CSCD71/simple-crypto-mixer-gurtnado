@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { expect, describe, it, beforeAll, afterAll } from 'vitest';
 
-import { createPublicClient, createWalletClient, http, parseEther, decodeEventLog, formatEther } from "viem";
+import { createPublicClient, createWalletClient, http, parseEther, decodeEventLog, formatEther, encodeAbiParameters, getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { foundry } from "viem/chains";
 
@@ -36,6 +36,14 @@ const privateKeys = [
 const secret = BigInt('6767676767676767676767676767676767676767676767676767676767676767676767676767');
 const nullifier = BigInt('2121212121212121212121212121212121212121212121212121212121212121212121212121');
 const commitment = poseidon2([secret, nullifier]);
+// const secret2 = BigInt('696969696969696969696969696969696969669696969696969696969696969696969696969');
+// const nullifier2 = BigInt('420420420420420420420420420420420420420420420420420420420420420420420420420');
+// const commitment2 = poseidon2([secret2, nullifier2]);
+const TREE_DEPTH = 20;
+
+const wasmFile = join("zk-data", "ProofOfMembership_js", "ProofOfMembership.wasm");
+const zkeyFile = join("zk-data", "ProofOfMembership.zkey");
+// const vKey = JSON.parse(readFileSync(join("zk-data", "ProofOfMembership.vkey")));
 
 function loadContract(contract, libraries={}) {
   const content = readFileSync(join('out', `${contract}.sol`, `${contract}.json`), "utf8");
@@ -58,10 +66,109 @@ function loadContract(contract, libraries={}) {
   return { abi, bytecode };
 }
 
+function computeZeroHashes(depth) {
+    const zeros = [0n];
+    for (let i = 1; i <= depth; i++) {
+        zeros.push(poseidon2([zeros[i - 1], zeros[i - 1]]));
+    }
+    return zeros;
+}
+
+function buildMerkleTree(leaves) {
+    const zeros = computeZeroHashes(TREE_DEPTH);
+    let currentLevel = new Map();
+
+    for (let i = 0; i < leaves.length; i++) {
+        currentLevel.set(i, BigInt(leaves[i]));
+    }
+
+    const levels = [currentLevel];
+
+    for (let d = 0; d < TREE_DEPTH; d++) {
+        const nextLevel = new Map();
+        const zeroAtLevel = zeros[d];
+        const parentIndices = new Set();
+
+        for (const idx of currentLevel.keys()) {
+            parentIndices.add(Math.floor(idx / 2));
+        }
+
+        for (const pIdx of parentIndices) {
+            const left = currentLevel.get(pIdx * 2) ?? zeroAtLevel;
+            const right = currentLevel.get(pIdx * 2 + 1) ?? zeroAtLevel;
+            nextLevel.set(pIdx, poseidon2([left, right]));
+        }
+
+        currentLevel = nextLevel;
+        levels.push(currentLevel);
+    }
+
+    return { levels, zeros };
+}
+
+function getMerkleProof(levels, leafIndex, zeros) {
+    const siblings = [];
+    const pathIndices = [];
+    let idx = leafIndex;
+
+    for (let d = 0; d < TREE_DEPTH; d++) {
+        const siblingIdx = idx % 2 === 0 ? idx + 1 : idx - 1;
+        siblings.push(levels[d].get(siblingIdx) ?? zeros[d]);
+        pathIndices.push(idx % 2);
+        idx = Math.floor(idx / 2);
+    }
+
+    return { siblings, pathIndices };
+}
+
+function encodeProofForContract(proof, publicSignals) {
+    const pA = [BigInt(proof.pi_a[0]), BigInt(proof.pi_a[1])];
+    const pB = [
+        [BigInt(proof.pi_b[0][1]), BigInt(proof.pi_b[0][0])],
+        [BigInt(proof.pi_b[1][1]), BigInt(proof.pi_b[1][0])],
+    ];
+    const pC = [BigInt(proof.pi_c[0]), BigInt(proof.pi_c[1])];
+    const signals = publicSignals.map((s) => BigInt(s));
+
+    return encodeAbiParameters(
+        [
+            { type: "uint256[2]", name: "pA" },
+            { type: "uint256[2][2]", name: "pB" },
+            { type: "uint256[2]", name: "pC" },
+            { type: "uint256[7]", name: "pubSignals" },
+        ],
+        [pA, pB, pC, signals]
+    );
+}
+
+async function buildWithdrawalProof({ secretValue, nullifierValue, nonce, commitments, mixerAddress, recipientAddress, chainId }) {
+    const targetCommitment = poseidon2([secretValue, nullifierValue]);
+    const leafIndex = commitments.findIndex((c) => BigInt(c) === targetCommitment);
+    if (leafIndex === -1) throw new Error("Commitment not found in commitments array");
+
+    const { levels, zeros } = buildMerkleTree(commitments);
+    const { siblings, pathIndices } = getMerkleProof(levels, leafIndex, zeros);
+
+    const inputs = {
+        secret: secretValue.toString(),
+        siblings: siblings.map((s) => s.toString()),
+        pathIndices: pathIndices.map((p) => p.toString()),
+        nullifier: nullifierValue.toString(),
+        nonce: nonce.toString(),
+        chainId: chainId.toString(),
+        mixer: BigInt(mixerAddress).toString(),
+        to: BigInt(recipientAddress).toString(),
+    };
+
+    const { proof, publicSignals } = await groth16.fullProve(inputs, wasmFile, zkeyFile);
+    return { proof, publicSignals };
+}
+
 describe("Mixer", function () {
 
     let depositor, withdrawer // wallets
     let contract;
+    const depositedCommitments = [];
 
     const receipts = [];
 
@@ -116,12 +223,13 @@ describe("Mixer", function () {
             const hash = await depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.1") });
             let receipt = await client.waitForTransactionReceipt({ hash });
             receipts.push({label: "Deposit", receipt});
+            depositedCommitments.push(commitment);
             // Check that the correct event was emitted
             expect(receipt.logs).toHaveLength(1);
             const log = receipt.logs[0];
             const { args, eventName } = decodeEventLog({abi, data: log.data, topics: log.topics });
-            expect(eventName).to.equal('CommittmentDeposited');
-            expect(args.committment).to.equal(commitment);
+            expect(eventName).to.equal('CommitmentDeposited');
+            expect(args.commitment).to.equal(commitment);
         });
         it("Should not allow deposits of less than 0.1 ETH", async function () {
             const { address, abi } = contract;
@@ -137,16 +245,114 @@ describe("Mixer", function () {
 
     describe("Withdraw", function () {
         it("Should allow withdrawal", async function () {
-            //todo
-            expect(true);
+            const { address, abi } = contract;
+            const recipient = getAddress(withdrawer.account.address);
+            const nonce = 123456789n;
+            const chainId = BigInt(foundry.id);
+            const before = await client.getBalance({ address: recipient });
+
+            const { proof, publicSignals } = await buildWithdrawalProof({
+                secretValue: secret,
+                nullifierValue: nullifier,
+                nonce,
+                commitments: depositedCommitments,
+                mixerAddress: address,
+                recipientAddress: recipient,
+                chainId,
+            });
+
+            const proofBytes = encodeProofForContract(proof, publicSignals);
+            const txHash = await withdrawer.writeContract({
+                address,
+                abi,
+                functionName: "withdraw",
+                args: [proofBytes, recipient, nonce],
+            });
+
+            const receipt = await client.waitForTransactionReceipt({ hash: txHash });
+            receipts.push({ label: "Withdraw", receipt });
+            expect(receipt.status).toBe("success");
+
+            const after = await client.getBalance({ address: recipient });
+            const gasCost = receipt.gasUsed * receipt.effectiveGasPrice;
+            const netReceived = after + gasCost - before;
+            expect(netReceived).toBe(parseEther("0.1"));
         });
         it("Should not allow withdrawal with improper secret", async function () {
-            //todo
-            expect(true);
+            const { address, abi } = contract;
+            const recipient = getAddress(withdrawer.account.address);
+            const nonce = 222222222n;
+            const chainId = BigInt(await client.getChainId());
+
+            const { proof, publicSignals } = await buildWithdrawalProof({
+                    secretValue: secret2,
+                    nullifierValue: nullifier,
+                    nonce,
+                    commitments: depositedCommitments,
+                    mixerAddress: address,
+                    recipientAddress: recipient,
+                    chainId,
+            });
+            const proofBytes = encodeProofForContract(proof, publicSignals);
+            const request = withdrawer.writeContract({
+                    address,
+                    abi,
+                    functionName: "withdraw",
+                    args: [proofBytes, recipient, nonce],
+            });
+            await expect(request).rejects.toThrow("Proof verification failed");
+        });
+        it("Should not allow withdrawal to incorrect address", async function () {
+            const { address, abi } = contract;
+            const proofRecipient = getAddress(withdrawer.account.address);
+            const wrongRecipient = getAddress(depositor.account.address);
+            const nonce = 333333333n;
+            const chainId = BigInt(await client.getChainId());
+
+            const { proof, publicSignals } = await buildWithdrawalProof({
+                secretValue: secret,
+                nullifierValue: nullifier,
+                nonce,
+                commitments: depositedCommitments,
+                mixerAddress: address,
+                recipientAddress: proofRecipient,
+                chainId,
+            });
+            const proofBytes = encodeProofForContract(proof, publicSignals);
+            const request = withdrawer.writeContract({
+                    address,
+                    abi,
+                    functionName: "withdraw",
+                    args: [proofBytes, wrongRecipient, nonce],
+            });
+            await expect(request).rejects.toThrow("Recipient mismatch");
         });
         it("Should not allow withdrawal of duplicate nullifiers", async function () {
-            //todo
-            expect(true);
+            const { address, abi } = contract;
+            const recipient = getAddress(withdrawer.account.address);
+            const nonce = 123456789n;
+            const chainId = BigInt(foundry.id);
+            const before = await client.getBalance({ address: recipient });
+
+            const { proof, publicSignals } = await buildWithdrawalProof({
+                secretValue: secret,
+                nullifierValue: nullifier,
+                nonce,
+                commitments: depositedCommitments,
+                mixerAddress: address,
+                recipientAddress: recipient,
+                chainId,
+            });
+
+            const proofBytes = encodeProofForContract(proof, publicSignals);
+            const request = await withdrawer.writeContract({
+                address,
+                abi,
+                functionName: "withdraw",
+                args: [proofBytes, recipient, nonce],
+            });
+
+            expect(request).rejects.toThrow("Nullifier already used");
         });
     });
 });
