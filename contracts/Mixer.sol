@@ -36,6 +36,7 @@ contract Mixer {
         insertLeaf(commitment);
     }
 
+    // currently not in use, the checks are happening manually lol
     function getHash(address payable to, uint256 nonce) public view returns(uint256) {
         return PoseidonT6.hash([
             uint256(block.chainid),           // to prevent reuse across multiple chains
@@ -48,11 +49,35 @@ contract Mixer {
 
     function withdraw(bytes calldata proof, address payable to, uint256 nonce) public {
         // unwrap the proof (to extract signals)
+        ( uint256[2] memory pia, uint256[2][2] memory pib, uint256[2] memory pic, uint256[7] memory signals)
+            = abi.decode(proof, (uint256[2], uint256[2][2], uint256[2], uint256[7]));
         // check the proof
+        (bool valid, ) = address(VERIFIER).staticcall(abi.encodeWithSelector(ProofOfMembershipVerifier.verifyProof.selector, pia, pib, pic, signals));
+        require(valid, "Proof verification failed"); 
         // extract data from signals
+        uint256 nullifier = signals[0];
+        uint256 proofNonce = signals[1];
+        uint256 proofChainId = signals[2];
+        uint256 proofMixer = signals[3];
+        uint256 proofTo = signals[4];
+        uint256 root = signals[5];
+        uint256 authHash = signals[6];
+
+        require(proofNonce == nonce, "Nonce mismatch");
+        require(proofChainId == block.chainid, "Chain mismatch");
+        require(proofMixer == uint256(uint160(address(this))), "Mixer mismatch");
+        require(proofTo == uint256(uint160(address(to))), "Recipient mismatch");
+
         // check and update nullifier reuse
-        // check hash
+        require(!nullifiers[nullifier], "Nullifier already used");
+        nullifiers[nullifier] = true;
+
         // check and update nonce reuse
+        require(!nonces[nonce], "Nonce already used");
+        nonces[nonce] = true;
+
         // transfer 0.1 ETH
+        (bool sent, ) = to.call{value: 0.1 ether}("");
+        require(sent, "Failed to send Ether");
     }
 }
