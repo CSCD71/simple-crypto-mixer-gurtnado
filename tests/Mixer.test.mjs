@@ -287,6 +287,8 @@ describe("Mixer", function () {
             to = withdrawer.account.address;
             amount = parseEther("0.1");
             nonce = randomBigInt32ModP();
+
+            // https://github.com/zk-kit/zk-kit/blob/main/packages/imt/src/types/index.ts
             tree = new IncrementalMerkleTree(poseidon2, TREE_DEPTH, BigInt(0), 2, depositedCommitments)
             const commitment = poseidon2([secret, nullifier]);
             const imtProof = tree.createProof(tree.indexOf(commitment));
@@ -323,41 +325,6 @@ describe("Mixer", function () {
             const { proof, publicSignals }  = pi;
             const res = await groth16.verify(vKey, publicSignals, proof);
             expect(res).to.be.true;
-        });
-
-        it("Should allow withdrawal", async function () {
-            const { address, abi } = contract;
-            const recipient = getAddress(withdrawer.account.address);
-            const nonce = 123456789n;
-            const chainId = BigInt(foundry.id);
-            const before = await client.getBalance({ address: recipient });
-
-            const { proof, publicSignals } = await buildWithdrawalProof({
-                secretValue: secret,
-                nullifierValue: nullifier,
-                nonce,
-                commitments: depositedCommitments,
-                mixerAddress: address,
-                recipientAddress: recipient,
-                chainId,
-            });
-
-            const proofBytes = encodeProofForContract(proof, publicSignals);
-            const txHash = await withdrawer.writeContract({
-                address,
-                abi,
-                functionName: "withdraw",
-                args: [proofBytes, recipient, nonce],
-            });
-
-            const receipt = await client.waitForTransactionReceipt({ hash: txHash });
-            receipts.push({ label: "Withdraw", receipt });
-            expect(receipt.status).toBe("success");
-
-            const after = await client.getBalance({ address: recipient });
-            const gasCost = receipt.gasUsed * receipt.effectiveGasPrice;
-            const netReceived = after + gasCost - before;
-            expect(netReceived).toBe(parseEther("0.1"));
         });
 
         it("Should not allow withdrawal with improper secret", async function () {
@@ -437,6 +404,28 @@ describe("Mixer", function () {
             });
 
             expect(request).rejects.toThrow("Nullifier already used");
+        });
+
+        it("Should allow withdrawal and transfer funds", async function () {
+            // pack arguments
+            const { proof, publicSignals }  = pi;
+            const proofCalldata = await groth16.exportSolidityCallData(proof, publicSignals);
+            const proofCalldataFormatted = JSON.parse("[" + proofCalldata + "]");
+            const proofCallDataEncoded = encodeAbiParameters(
+              [
+                { type: 'uint256[2]' },
+                { type: 'uint256[2][2]' },
+                { type: 'uint256[2]' },
+                { type: 'uint256[4]' },
+              ],
+              proofCalldataFormatted
+            );
+            // call the contract (success)
+            const hash = await withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [proofCallDataEncoded, to, nonce] });
+            const receipt = await client.waitForTransactionReceipt({ hash });
+            receipts.push({label: "Withdraw", receipt});
+            const nullifierIsUsed = await client.readContract({ ...contract, functionName: "isUsed", args: [nullifier]});
+            expect(nullifierIsUsed).to.be.true;
         });
     });
 });

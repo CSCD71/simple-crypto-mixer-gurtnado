@@ -30,6 +30,10 @@ contract Mixer {
         tree.insert(_leaf);
     }
 
+    function isUsed(uint256 nullifier) public view returns(bool) {
+        return nullifiers[nullifier];
+    }
+
     function deposit(uint256 commitment) payable public {
         require(msg.value == 0.1 ether, "Must send exactly 0.1 ETH");
         emit CommitmentDeposited(commitment);
@@ -57,16 +61,18 @@ contract Mixer {
         uint256 hash = signals[3];
         uint256 nullifier = signals[2];
         uint256 root = signals[0];
-        // // check hash
-        // require(hash == getHash(to, amount, nonce));
-        // // check and update nullifier reuse
-        // require(!nullifiers[nullifier], "Nullifier already used");
-        // nullifiers[nullifier] = true;
-        // // check and update nonce reuse
-        // require(!nonces[nonce], "Nonce already used");
-        // nonces[nonce] = true;
-        // // transfer 0.1 ETH
-        // (bool sent, ) = to.call{value: 0.1 ether}("");
-        // require(sent, "Failed to send Ether");
+        // check root
+        require(root == tree.root, "Invalid Merkle tree root")
+        // check hash
+        require(hash == getHash(to, nonce), "Invalid zkNonce");
+        // check and update nullifier reuse
+        require(!nullifiers[nullifier], "Nullifier already used");
+        nullifiers[nullifier] = true;
+        // check and update nonce reuse
+        require(!nonces[nonce], "Nonce already used");
+        nonces[nonce] = true;
+        // transfer 0.1 ETH
+        (bool sent, ) = to.call{value: 0.1 ether}("");
+        require(sent, "Failed to send Ether");
     }
 }
