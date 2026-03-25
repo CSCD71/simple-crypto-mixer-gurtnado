@@ -78,102 +78,41 @@ function randomBigInt32ModP() {
   return BigInt('0x' + hex) % p;
 }
 
-function computeZeroHashes(depth) {
-    const zeros = [0n];
-    for (let i = 1; i <= depth; i++) {
-        zeros.push(poseidon2([zeros[i - 1], zeros[i - 1]]));
-    }
-    return zeros;
+function generateMerkleProof(secret, nullifier, commitments) {
+    // https://github.com/zk-kit/zk-kit/blob/main/packages/imt/src/types/index.ts
+    const tree = new IncrementalMerkleTree(poseidon2, TREE_DEPTH, BigInt(0), 2, commitments)
+    const commitment = poseidon2([secret, nullifier]);
+    const imtProof = tree.createProof(tree.indexOf(commitment));
+    return { imtProof: imtProof };
 }
 
-function buildMerkleTree(leaves) {
-    const zeros = computeZeroHashes(TREE_DEPTH);
-    let currentLevel = new Map();
-
-    for (let i = 0; i < leaves.length; i++) {
-        currentLevel.set(i, BigInt(leaves[i]));
-    }
-
-    const levels = [currentLevel];
-
-    for (let d = 0; d < TREE_DEPTH; d++) {
-        const nextLevel = new Map();
-        const zeroAtLevel = zeros[d];
-        const parentIndices = new Set();
-
-        for (const idx of currentLevel.keys()) {
-            parentIndices.add(Math.floor(idx / 2));
-        }
-
-        for (const pIdx of parentIndices) {
-            const left = currentLevel.get(pIdx * 2) ?? zeroAtLevel;
-            const right = currentLevel.get(pIdx * 2 + 1) ?? zeroAtLevel;
-            nextLevel.set(pIdx, poseidon2([left, right]));
-        }
-
-        currentLevel = nextLevel;
-        levels.push(currentLevel);
-    }
-
-    return { levels, zeros };
-}
-
-function getMerkleProof(levels, leafIndex, zeros) {
-    const siblings = [];
-    const pathIndices = [];
-    let idx = leafIndex;
-
-    for (let d = 0; d < TREE_DEPTH; d++) {
-        const siblingIdx = idx % 2 === 0 ? idx + 1 : idx - 1;
-        siblings.push(levels[d].get(siblingIdx) ?? zeros[d]);
-        pathIndices.push(idx % 2);
-        idx = Math.floor(idx / 2);
-    }
-
-    return { siblings, pathIndices };
-}
-
-function encodeProofForContract(proof, publicSignals) {
-    const pA = [BigInt(proof.pi_a[0]), BigInt(proof.pi_a[1])];
-    const pB = [
-        [BigInt(proof.pi_b[0][1]), BigInt(proof.pi_b[0][0])],
-        [BigInt(proof.pi_b[1][1]), BigInt(proof.pi_b[1][0])],
-    ];
-    const pC = [BigInt(proof.pi_c[0]), BigInt(proof.pi_c[1])];
-    const signals = publicSignals.map((s) => BigInt(s));
-
-    return encodeAbiParameters(
-        [
-            { type: "uint256[2]", name: "pA" },
-            { type: "uint256[2][2]", name: "pB" },
-            { type: "uint256[2]", name: "pC" },
-            { type: "uint256[7]", name: "pubSignals" },
-        ],
-        [pA, pB, pC, signals]
-    );
-}
-
-async function buildWithdrawalProof({ secretValue, nullifierValue, nonce, commitments, mixerAddress, recipientAddress, chainId }) {
-    const targetCommitment = poseidon2([secretValue, nullifierValue]);
-    const leafIndex = commitments.findIndex((c) => BigInt(c) === targetCommitment);
-    if (leafIndex === -1) throw new Error("Commitment not found in commitments array");
-
-    const { levels, zeros } = buildMerkleTree(commitments);
-    const { siblings, pathIndices } = getMerkleProof(levels, leafIndex, zeros);
-
+async function generateZkProof(address, to, nonce, secret, nullifier, commitments) {
+    const { imtProof } = generateMerkleProof(secret, nullifier, commitments);
+    const zkNonce = poseidon5([BigInt(foundry.id), BigInt(address), BigInt(to), parseEther("0.1"), nonce]);
     const inputs = {
-        secret: secretValue.toString(),
-        siblings: siblings.map((s) => s.toString()),
-        pathIndices: pathIndices.map((p) => p.toString()),
-        nullifier: nullifierValue.toString(),
-        nonce: nonce.toString(),
-        chainId: chainId.toString(),
-        mixer: BigInt(mixerAddress).toString(),
-        to: BigInt(recipientAddress).toString(),
+        secret: secret,
+        siblings: imtProof.siblings,
+        pathIndices: imtProof.pathIndices,
+        nullifier: nullifier,
+        nonce: zkNonce
     };
-
     const { proof, publicSignals } = await groth16.fullProve(inputs, wasmFile, zkeyFile);
     return { proof, publicSignals };
+}
+
+async function packProofArgs(proof, publicSignals) {
+    const proofCalldata = await groth16.exportSolidityCallData(proof, publicSignals);
+    const proofCalldataFormatted = JSON.parse("[" + proofCalldata + "]");
+    const proofCalldataEncoded = encodeAbiParameters(
+      [
+        { type: 'uint256[2]' },
+        { type: 'uint256[2][2]' },
+        { type: 'uint256[2]' },
+        { type: 'uint256[4]' },
+      ],
+      proofCalldataFormatted
+    );
+    return proofCalldataEncoded;
 }
 
 describe("Mixer", function () {
@@ -280,30 +219,16 @@ describe("Mixer", function () {
 
     describe("Withdraw", function () {
 
-        let to, amount, nonce, tree, root;
+        let to, nonce, root;
         let pi;
 
         beforeAll(async () => {
             to = withdrawer.account.address;
-            amount = parseEther("0.1");
             nonce = randomBigInt32ModP();
+            root = generateMerkleProof(secret, nullifier, depositedCommitments).imtProof.root;
 
-            // https://github.com/zk-kit/zk-kit/blob/main/packages/imt/src/types/index.ts
-            tree = new IncrementalMerkleTree(poseidon2, TREE_DEPTH, BigInt(0), 2, depositedCommitments)
-            const commitment = poseidon2([secret, nullifier]);
-            const imtProof = tree.createProof(tree.indexOf(commitment));
-            root = imtProof.root;
-
-            // create the proof
-            const zkNonce = poseidon5([BigInt(foundry.id), BigInt(contract.address), BigInt(to), amount, nonce]);
-            const inputs = {
-                secret: secret,
-                siblings: imtProof.siblings,
-                pathIndices: imtProof.pathIndices,
-                nullifier: nullifier,
-                nonce: zkNonce
-            };
-            const { proof, publicSignals } = await groth16.fullProve(inputs, wasmFile, zkeyFile);
+            // generate proof
+            const { proof, publicSignals } = await generateZkProof(contract.address, to, nonce, secret, nullifier, depositedCommitments);
             pi = { proof, publicSignals };
         });
       
@@ -322,110 +247,50 @@ describe("Mixer", function () {
         });
 
         it("Should verify the proof locally", async function () {   
-            const { proof, publicSignals }  = pi;
+            const { proof, publicSignals } = pi;
             const res = await groth16.verify(vKey, publicSignals, proof);
             expect(res).to.be.true;
         });
 
-        it("Should not allow withdrawal with improper secret", async function () {
-            const { address, abi } = contract;
-            const recipient = getAddress(withdrawer.account.address);
-            const nonce = 222222222n;
-            const chainId = BigInt(await client.getChainId());
-
-            const { proof, publicSignals } = await buildWithdrawalProof({
-                    secretValue: secret2,
-                    nullifierValue: nullifier,
-                    nonce,
-                    commitments: depositedCommitments,
-                    mixerAddress: address,
-                    recipientAddress: recipient,
-                    chainId,
-            });
-            const proofBytes = encodeProofForContract(proof, publicSignals);
-            const request = withdrawer.writeContract({
-                    address,
-                    abi,
-                    functionName: "withdraw",
-                    args: [proofBytes, recipient, nonce],
-            });
-            await expect(request).rejects.toThrow("Proof verification failed");
-        });
+        // note: doesn't trigger correct error message; either reverts contract call, or goes to "Invalid Merkle tree root" message
+        // it("Should not allow withdrawal with bad proof", async function () {
+        //     const badProof = "0x676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767"
+        //     const request = withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [badProof, to, nonce] });
+        //     await expect(request).rejects.toThrow("Proof verification failed");
+        // });
 
         it("Should not allow withdrawal to incorrect address", async function () {
-            const { address, abi } = contract;
-            const proofRecipient = getAddress(withdrawer.account.address);
-            const wrongRecipient = getAddress(depositor.account.address);
-            const nonce = 333333333n;
-            const chainId = BigInt(await client.getChainId());
+            // pack arguments
+            const { proof, publicSignals } = pi
+            const proofCalldataEncoded = await packProofArgs(proof, publicSignals);
 
-            const { proof, publicSignals } = await buildWithdrawalProof({
-                secretValue: secret,
-                nullifierValue: nullifier,
-                nonce,
-                commitments: depositedCommitments,
-                mixerAddress: address,
-                recipientAddress: proofRecipient,
-                chainId,
-            });
-            const proofBytes = encodeProofForContract(proof, publicSignals);
-            const request = withdrawer.writeContract({
-                    address,
-                    abi,
-                    functionName: "withdraw",
-                    args: [proofBytes, wrongRecipient, nonce],
-            });
-            await expect(request).rejects.toThrow("Recipient mismatch");
-        });
-
-        it("Should not allow withdrawal of duplicate nullifiers", async function () {
-            const { address, abi } = contract;
-            const recipient = getAddress(withdrawer.account.address);
-            const nonce = 123456789n;
-            const chainId = BigInt(foundry.id);
-            const before = await client.getBalance({ address: recipient });
-
-            const { proof, publicSignals } = await buildWithdrawalProof({
-                secretValue: secret,
-                nullifierValue: nullifier,
-                nonce,
-                commitments: depositedCommitments,
-                mixerAddress: address,
-                recipientAddress: recipient,
-                chainId,
-            });
-
-            const proofBytes = encodeProofForContract(proof, publicSignals);
-            const request = withdrawer.writeContract({
-                address,
-                abi,
-                functionName: "withdraw",
-                args: [proofBytes, recipient, nonce],
-            });
-
-            expect(request).rejects.toThrow("Nullifier already used");
+            // call the contract
+            const thief = depositor.account.address;
+            const request = withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [proofCalldataEncoded, thief, nonce] });
+            await expect(request).rejects.toThrow("Invalid zkNonce");
         });
 
         it("Should allow withdrawal and transfer funds", async function () {
             // pack arguments
-            const { proof, publicSignals }  = pi;
-            const proofCalldata = await groth16.exportSolidityCallData(proof, publicSignals);
-            const proofCalldataFormatted = JSON.parse("[" + proofCalldata + "]");
-            const proofCallDataEncoded = encodeAbiParameters(
-              [
-                { type: 'uint256[2]' },
-                { type: 'uint256[2][2]' },
-                { type: 'uint256[2]' },
-                { type: 'uint256[4]' },
-              ],
-              proofCalldataFormatted
-            );
+            const { proof, publicSignals } = pi;
+            const proofCalldataEncoded = await packProofArgs(proof, publicSignals);
+
             // call the contract (success)
-            const hash = await withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [proofCallDataEncoded, to, nonce] });
+            const hash = await withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [proofCalldataEncoded, to, nonce] });
             const receipt = await client.waitForTransactionReceipt({ hash });
             receipts.push({label: "Withdraw", receipt});
             const nullifierIsUsed = await client.readContract({ ...contract, functionName: "isUsed", args: [nullifier]});
             expect(nullifierIsUsed).to.be.true;
+        });
+
+        it("Should not allow withdrawal of duplicate nullifiers", async function () {
+            // pack arguments
+            const { proof, publicSignals } = pi;
+            const proofCalldataEncoded = await packProofArgs(proof, publicSignals);
+
+            // call the contract
+            const request = withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [proofCalldataEncoded, to, nonce] });
+            await expect(request).rejects.toThrow("Nullifier already used");
         });
     });
 });

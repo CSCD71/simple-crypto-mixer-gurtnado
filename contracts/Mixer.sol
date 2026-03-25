@@ -22,7 +22,7 @@ contract Mixer {
 	
     constructor(ProofOfMembershipVerifier _verifier) {
 		    VERIFIER = _verifier;
-        tree.init(1, 0); // init 1 deep. will tree.insert() increase depth?
+        tree.init(20, 0); // init 1 deep. will tree.insert() increase depth?
     }
 
     // https://www.npmjs.com/package/@zk-kit/incremental-merkle-tree.sol
@@ -56,19 +56,19 @@ contract Mixer {
             = abi.decode(proof, (uint256[2], uint256[2][2], uint256[2], uint256[4]));
         // check the proof
         (bool valid, ) = address(VERIFIER).staticcall(abi.encodeWithSelector(ProofOfMembershipVerifier.verifyProof.selector, pia, pib, pic, signals));
-        require(valid, "Proof verification failed"); 
+        require(valid, "Proof verification failed");
         // extract data from signals
         uint256 hash = signals[3];
         uint256 nullifier = signals[2];
         uint256 root = signals[0];
         // check root
-        require(root == tree.root, "Invalid Merkle tree root")
+        require(root == tree.root, "Invalid Merkle tree root");
         // check hash
         require(hash == getHash(to, nonce), "Invalid zkNonce");
         // check and update nullifier reuse
         require(!nullifiers[nullifier], "Nullifier already used");
         nullifiers[nullifier] = true;
-        // check and update nonce reuse
+        // check and update nonce reuse [is this done?]
         require(!nonces[nonce], "Nonce already used");
         nonces[nonce] = true;
         // transfer 0.1 ETH
