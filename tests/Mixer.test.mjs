@@ -8,14 +8,9 @@ import { privateKeyToAccount } from "viem/accounts";
 import { foundry } from "viem/chains";
 
 import { proxy, PoseidonT6, PoseidonT3 } from 'poseidon-solidity';
+import { poseidon2, poseidon3 } from 'poseidon-lite';
 
-import { randomBytes } from '@noble/ciphers/webcrypto';
-import { poseidon2, poseidon3, poseidon5 } from 'poseidon-lite';
-
-import { IncrementalMerkleTree } from "@zk-kit/incremental-merkle-tree";
-import { poseidon } from "circomlibjs";
-
-import { groth16 } from 'snarkjs';
+import { randomBigInt32ModP, generateMerkleProof, generateZkProof, verifyZkProof, packProofArgs } from '../utils/utils.js';
 
 const rpc = http("http://127.0.0.1:8545");
 const client = await createPublicClient({ chain: foundry, transport: rpc });
@@ -32,18 +27,6 @@ const privateKeys = [
     "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97",
     "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
 ];
-
-// const secret = BigInt('6767676767676767676767676767676767676767676767676767676767676767676767676767');
-// const nullifier = BigInt('2121212121212121212121212121212121212121212121212121212121212121212121212121');
-// const commitment = poseidon2([secret, nullifier]);
-// const secret2 = BigInt('696969696969696969696969696969696969669696969696969696969696969696969696969');
-// const nullifier2 = BigInt('420420420420420420420420420420420420420420420420420420420420420420420420420');
-// const commitment2 = poseidon2([secret2, nullifier2]);
-const TREE_DEPTH = 20;
-
-const wasmFile = join("zk-data", "ProofOfMembership_js", "ProofOfMembership.wasm");
-const zkeyFile = join("zk-data", "ProofOfMembership.zkey");
-const vKey = JSON.parse(readFileSync(join("zk-data", "ProofOfMembership.vkey")));
 
 function loadContract(contract, libraries={}) {
   const content = readFileSync(join('out', `${contract}.sol`, `${contract}.json`), "utf8");
@@ -64,55 +47,6 @@ function loadContract(contract, libraries={}) {
       bytecode = bytecode.replaceAll(substitution, substitutions[substitution]);
   }
   return { abi, bytecode };
-}
-
-const p = BigInt('21888242871839275222246405745257275088548364400416034343698204186575808495617');
-
-function randomBigInt32ModP() {
-  const bytes = randomBytes(32)
-  
-  const hex = Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-
-  return BigInt('0x' + hex) % p;
-}
-
-function generateMerkleProof(secret, nullifier, commitments) {
-    // https://github.com/zk-kit/zk-kit/blob/main/packages/imt/src/types/index.ts
-    const tree = new IncrementalMerkleTree(poseidon2, TREE_DEPTH, BigInt(0), 2, commitments)
-    const commitment = poseidon2([secret, nullifier]);
-    const imtProof = tree.createProof(tree.indexOf(commitment));
-    return { imtProof: imtProof };
-}
-
-async function generateZkProof(address, to, nonce, secret, nullifier, commitments) {
-    const { imtProof } = generateMerkleProof(secret, nullifier, commitments);
-    const zkNonce = poseidon5([BigInt(foundry.id), BigInt(address), BigInt(to), parseEther("0.1"), nonce]);
-    const inputs = {
-        secret: secret,
-        siblings: imtProof.siblings,
-        pathIndices: imtProof.pathIndices,
-        nullifier: nullifier,
-        nonce: zkNonce
-    };
-    const { proof, publicSignals } = await groth16.fullProve(inputs, wasmFile, zkeyFile);
-    return { proof, publicSignals };
-}
-
-async function packProofArgs(proof, publicSignals) {
-    const proofCalldata = await groth16.exportSolidityCallData(proof, publicSignals);
-    const proofCalldataFormatted = JSON.parse("[" + proofCalldata + "]");
-    const proofCalldataEncoded = encodeAbiParameters(
-      [
-        { type: 'uint256[2]' },
-        { type: 'uint256[2][2]' },
-        { type: 'uint256[2]' },
-        { type: 'uint256[4]' },
-      ],
-      proofCalldataFormatted
-    );
-    return proofCalldataEncoded;
 }
 
 describe("Mixer", function () {
@@ -248,7 +182,7 @@ describe("Mixer", function () {
 
         it("Should verify the proof locally", async function () {   
             const { proof, publicSignals } = pi;
-            const res = await groth16.verify(vKey, publicSignals, proof);
+            const res = await verifyZkProof(proof, publicSignals);
             expect(res).to.be.true;
         });
 
