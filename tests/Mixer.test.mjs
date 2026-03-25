@@ -43,7 +43,7 @@ const TREE_DEPTH = 20;
 
 const wasmFile = join("zk-data", "ProofOfMembership_js", "ProofOfMembership.wasm");
 const zkeyFile = join("zk-data", "ProofOfMembership.zkey");
-// const vKey = JSON.parse(readFileSync(join("zk-data", "ProofOfMembership.vkey")));
+const vKey = JSON.parse(readFileSync(join("zk-data", "ProofOfMembership.vkey")));
 
 function loadContract(contract, libraries={}) {
   const content = readFileSync(join('out', `${contract}.sol`, `${contract}.json`), "utf8");
@@ -317,6 +317,12 @@ describe("Mixer", function () {
             expect(BigInt(publicSignals[2])).to.equal(nullifier);
 
             expect(BigInt(publicSignals[3])).to.equal(zkNonce);
+        });
+
+        it("Should verify the proof locally", async function () {   
+            const { proof, publicSignals }  = pi;
+            const res = await groth16.verify(vKey, publicSignals, proof);
+            expect(res).to.be.true;
         });
 
         it("Should allow withdrawal", async function () {
