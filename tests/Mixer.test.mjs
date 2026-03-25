@@ -10,7 +10,7 @@ import { foundry } from "viem/chains";
 import { proxy, PoseidonT6, PoseidonT3 } from 'poseidon-solidity';
 
 import { randomBytes } from '@noble/ciphers/webcrypto';
-import { poseidon2, poseidon5 } from 'poseidon-lite';
+import { poseidon2, poseidon3, poseidon5 } from 'poseidon-lite';
 
 import { IncrementalMerkleTree } from "@zk-kit/incremental-merkle-tree";
 import { poseidon } from "circomlibjs";
@@ -280,7 +280,7 @@ describe("Mixer", function () {
 
     describe("Withdraw", function () {
 
-        let to, amount, nonce, tree;
+        let to, amount, nonce, tree, root;
         let pi;
 
         beforeAll(async () => {
@@ -290,19 +290,35 @@ describe("Mixer", function () {
             tree = new IncrementalMerkleTree(poseidon2, TREE_DEPTH, BigInt(0), 2, depositedCommitments)
             const commitment = poseidon2([secret, nullifier]);
             const imtProof = tree.createProof(tree.indexOf(commitment));
+            root = imtProof.root;
 
             // create the proof
+            const zkNonce = poseidon5([BigInt(foundry.id), BigInt(contract.address), BigInt(to), amount, nonce]);
             const inputs = {
                 secret: secret,
                 siblings: imtProof.siblings,
                 pathIndices: imtProof.pathIndices,
                 nullifier: nullifier,
-                nonce: poseidon5([BigInt(foundry.id), BigInt(contract.address), BigInt(to), amount, nonce])
+                nonce: zkNonce
             };
             const { proof, publicSignals } = await groth16.fullProve(inputs, wasmFile, zkeyFile);
             pi = { proof, publicSignals };
         });
       
+        it("Should verify the public signals", async function () {
+            const { publicSignals } = pi;
+            const zkNonce = await client.readContract({ ...contract, functionName: "getHash", args: [withdrawer.account.address, nonce] });
+
+            expect(BigInt(publicSignals[0])).to.equal(root);
+
+            const authHash = poseidon3([secret, nullifier, zkNonce]);
+            expect(BigInt(publicSignals[1])).to.equal(authHash);
+
+            expect(BigInt(publicSignals[2])).to.equal(nullifier);
+
+            expect(BigInt(publicSignals[3])).to.equal(zkNonce);
+        });
+
         it("Should allow withdrawal", async function () {
             const { address, abi } = contract;
             const recipient = getAddress(withdrawer.account.address);
