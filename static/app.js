@@ -8,148 +8,70 @@ import {
   encodeAbiParameters,
 } from "https://esm.sh/viem@2.19.4";
 import * as chains from "https://esm.sh/viem@2.19.4/chains";
-import { poseidon2 } from "https://esm.sh/poseidon-lite@0.3.0";
-import { randomBytes } from '@noble/ciphers/webcrypto';
+import { poseidon2, poseidon3, poseidon5 } from "https://esm.sh/poseidon-lite@0.3.0";
+import { IncrementalMerkleTree } from "https://esm.sh/@zk-kit/incremental-merkle-tree@1.1.0";
 
 // ---------------------------------------------------------------------------
-// ZK constants & helpers (browser-compatible replacements for @prifilabs/zk-toolbox)
+// ZK Utility functions (browser-compatible reimplementations of utils/utils.js)
 // ---------------------------------------------------------------------------
-const SNARK_FIELD_SIZE = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 const TREE_DEPTH = 20;
-const WASM_PATH = "zk-data/ProofOfMembership_js/ProofOfMembership.wasm";
-const ZKEY_PATH = "zk-data/ProofOfMembership.zkey";
-const VKEY_PATH = "zk-data/ProofOfMembership.vkey";
 const p = BigInt('21888242871839275222246405745257275088548364400416034343698204186575808495617');
 
-// ---------------------------------------------------------------------------
-// Sourced from https://github.com/prifilabs/zk-toolbox/blob/master/src/Utils.ts
-// ---------------------------------------------------------------------------
+const wasmPath = "zk-data/ProofOfMembership_js/ProofOfMembership.wasm";
+const zkeyPath = "zk-data/ProofOfMembership.zkey";
+
+let vKeyCache = null;
+async function loadVKey() {
+  if (vKeyCache) return vKeyCache;
+  const response = await fetch("zk-data/ProofOfMembership.vkey", { cache: "no-store" });
+  if (!response.ok) throw new Error("Failed to load verification key");
+  vKeyCache = await response.json();
+  return vKeyCache;
+}
+
 function randomBigInt32ModP() {
-  const bytes = randomBytes(32)
-  const hex = Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
   return BigInt('0x' + hex) % p;
 }
 
-// ---------------------------------------------------------------------------
-// Sparse incremental Merkle tree (matches @zk-kit/incremental-merkle-tree with Poseidon)
-// ---------------------------------------------------------------------------
-function computeZeroHashes(depth) {
-  const zeros = [0n];
-  for (let i = 1; i <= depth; i++) {
-    zeros.push(poseidon2([zeros[i - 1], zeros[i - 1]]));
-  }
-  return zeros;
-}
-
-function buildMerkleTree(leaves) {
-  const zeros = computeZeroHashes(TREE_DEPTH);
-
-  // Level 0: leaf values (sparse map)
-  let currentLevel = new Map();
-  for (let i = 0; i < leaves.length; i++) {
-    currentLevel.set(i, leaves[i]);
-  }
-
-  const levels = [currentLevel];
-
-  for (let d = 0; d < TREE_DEPTH; d++) {
-    const nextLevel = new Map();
-    const zeroAtLevel = zeros[d];
-
-    // Collect parent indices that have at least one non-default child
-    const parentIndices = new Set();
-    for (const idx of currentLevel.keys()) {
-      parentIndices.add(Math.floor(idx / 2));
-    }
-
-    for (const pIdx of parentIndices) {
-      const left = currentLevel.get(pIdx * 2) ?? zeroAtLevel;
-      const right = currentLevel.get(pIdx * 2 + 1) ?? zeroAtLevel;
-      nextLevel.set(pIdx, poseidon2([left, right]));
-    }
-
-    currentLevel = nextLevel;
-    levels.push(currentLevel);
-  }
-
-  const root = currentLevel.get(0) ?? zeros[TREE_DEPTH];
-  return { levels, root, zeros };
-}
-
-function getMerkleProof(levels, leafIndex, zeros) {
-  const siblings = [];
-  const pathIndices = [];
-  let idx = leafIndex;
-
-  for (let d = 0; d < TREE_DEPTH; d++) {
-    const siblingIdx = idx % 2 === 0 ? idx + 1 : idx - 1;
-    siblings.push(levels[d].get(siblingIdx) ?? zeros[d]);
-    pathIndices.push(idx % 2);
-    idx = Math.floor(idx / 2);
-  }
-
-  return { siblings, pathIndices };
-}
-
-// ---------------------------------------------------------------------------
-// Proof generation & encoding (using snarkjs loaded globally from CDN)
-// ---------------------------------------------------------------------------
-export async function generateZkProof(secret, nullifier, nonce, commitments, chainId, mixerAddress, recipientAddress) {
-  // Build the Merkle tree from on-chain commitments
+function generateMerkleProof(secret, nullifier, commitments) {
+  const tree = new IncrementalMerkleTree(poseidon2, TREE_DEPTH, BigInt(0), 2, commitments);
   const commitment = poseidon2([secret, nullifier]);
-  const leafIndex = commitments.findIndex((c) => c === commitment);
-  if (leafIndex === -1) throw new Error("Commitment not found in the on-chain Merkle tree");
+  const imtProof = tree.createProof(tree.indexOf(commitment));
+  return { imtProof };
+}
 
-  const { levels, zeros } = buildMerkleTree(commitments);
-  const { siblings, pathIndices } = getMerkleProof(levels, leafIndex, zeros);
-
-  // Prepare circuit inputs (snarkjs expects string values)
-  const circuitInputs = {
-    secret: secret.toString(),
-    siblings: siblings.map((s) => s.toString()),
-    pathIndices: pathIndices.map((p) => p.toString()),
-    nullifier: nullifier.toString(),
-    nonce: nonce.toString(),
-    chainId: BigInt(chainId).toString(),
-    mixer: BigInt(mixerAddress).toString(),
-    to: BigInt(recipientAddress).toString(),
+async function generateZkProof(contractAddress, to, nonce, secret, nullifier, commitments, chainId) {
+  const { imtProof } = generateMerkleProof(secret, nullifier, commitments);
+  const zkNonce = poseidon5([BigInt(chainId), BigInt(contractAddress), BigInt(to), parseEther("0.1"), nonce]);
+  const inputs = {
+    secret: secret,
+    siblings: imtProof.siblings,
+    pathIndices: imtProof.pathIndices,
+    nullifier: nullifier,
+    nonce: zkNonce,
   };
-
-  // Generate Groth16 proof via snarkjs (loaded as global from CDN)
-  const { proof, publicSignals } = await window.snarkjs.groth16.fullProve(
-    circuitInputs,
-    WASM_PATH,
-    ZKEY_PATH
-  );
-
+  const { proof, publicSignals } = await window.snarkjs.groth16.fullProve(inputs, wasmPath, zkeyPath);
   return { proof, publicSignals };
 }
 
-async function verifyZkProofLocally(proof, publicSignals) {
-  const vkey = await fetch(VKEY_PATH).then((r) => r.json());
-  return window.snarkjs.groth16.verify(vkey, publicSignals, proof);
+async function verifyZkProof(proof, publicSignals) {
+  const vKey = await loadVKey();
+  return window.snarkjs.groth16.verify(vKey, publicSignals, proof);
 }
 
-function encodeProofForContract(proof, publicSignals) {
-  // Groth16 proof points (note: pi_b coordinates are swapped for Solidity verifier)
-  const pA = [BigInt(proof.pi_a[0]), BigInt(proof.pi_a[1])];
-  const pB = [
-    [BigInt(proof.pi_b[0][1]), BigInt(proof.pi_b[0][0])],
-    [BigInt(proof.pi_b[1][1]), BigInt(proof.pi_b[1][0])],
-  ];
-  const pC = [BigInt(proof.pi_c[0]), BigInt(proof.pi_c[1])];
-  const signals = publicSignals.map((s) => BigInt(s));
-
+async function packProofArgs(proof, publicSignals) {
+  const proofCalldata = await window.snarkjs.groth16.exportSolidityCallData(proof, publicSignals);
+  const proofCalldataFormatted = JSON.parse("[" + proofCalldata + "]");
   return encodeAbiParameters(
     [
-      { type: "uint256[2]", name: "pA" },
-      { type: "uint256[2][2]", name: "pB" },
-      { type: "uint256[2]", name: "pC" },
-      { type: "uint256[7]", name: "pubSignals" },
+      { type: 'uint256[2]' },
+      { type: 'uint256[2][2]' },
+      { type: 'uint256[2]' },
+      { type: 'uint256[4]' },
     ],
-    [pA, pB, pC, signals]
+    proofCalldataFormatted
   );
 }
 
@@ -712,18 +634,18 @@ withdrawForm?.addEventListener("submit", async (event) => {
 
     // Step 3: Generate the proof using snarkjs + local Merkle tree (browser-compatible)
     const { proof, publicSignals } = await generateZkProof(
+      chainConfig.address,
+      recipient,
+      nonce,
       secret,
       nullifier,
-      nonce,
       commitments,
-      currentChainId,
-      chainConfig.address,
-      recipient
+      currentChainId
     );
 
     // Step 3.5: Verify the proof locally (optional sanity check)
     setProofStatus("Verifying proof locally...", true);
-    const verified = await verifyZkProofLocally(proof, publicSignals);
+    const verified = await verifyZkProof(proof, publicSignals);
     if (!verified) {
       setWithdrawMessage("Local proof verification failed. Please try again.");
       setProofStatus("", false);
@@ -734,7 +656,7 @@ withdrawForm?.addEventListener("submit", async (event) => {
     setWithdrawMessage("Submitting withdraw transaction...");
 
     // Step 4: Encode the proof for the Solidity verifier and submit
-    const proofBytes = encodeProofForContract(proof, publicSignals);
+    const proofBytes = await packProofArgs(proof, publicSignals);
     const chain = getChainById(currentChainId);
 
     const hash = await walletClient.writeContract({
