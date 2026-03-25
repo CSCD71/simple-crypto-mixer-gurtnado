@@ -9,11 +9,11 @@ import { foundry } from "viem/chains";
 
 import { proxy, PoseidonT6, PoseidonT3 } from 'poseidon-solidity';
 
+import { randomBytes } from '@noble/ciphers/webcrypto';
+import { poseidon2, poseidon5 } from 'poseidon-lite';
+
 import { IncrementalMerkleTree } from "@zk-kit/incremental-merkle-tree";
 import { poseidon } from "circomlibjs";
-import { Contract, ethers } from "ethers";
-
-import { poseidon2 } from 'poseidon-lite';
 
 import { groth16 } from 'snarkjs';
 
@@ -33,9 +33,9 @@ const privateKeys = [
     "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
 ];
 
-const secret = BigInt('6767676767676767676767676767676767676767676767676767676767676767676767676767');
-const nullifier = BigInt('2121212121212121212121212121212121212121212121212121212121212121212121212121');
-const commitment = poseidon2([secret, nullifier]);
+// const secret = BigInt('6767676767676767676767676767676767676767676767676767676767676767676767676767');
+// const nullifier = BigInt('2121212121212121212121212121212121212121212121212121212121212121212121212121');
+// const commitment = poseidon2([secret, nullifier]);
 // const secret2 = BigInt('696969696969696969696969696969696969669696969696969696969696969696969696969');
 // const nullifier2 = BigInt('420420420420420420420420420420420420420420420420420420420420420420420420420');
 // const commitment2 = poseidon2([secret2, nullifier2]);
@@ -64,6 +64,18 @@ function loadContract(contract, libraries={}) {
       bytecode = bytecode.replaceAll(substitution, substitutions[substitution]);
   }
   return { abi, bytecode };
+}
+
+const p = BigInt('21888242871839275222246405745257275088548364400416034343698204186575808495617');
+
+function randomBigInt32ModP() {
+  const bytes = randomBytes(32)
+  
+  const hex = Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  return BigInt('0x' + hex) % p;
 }
 
 function computeZeroHashes(depth) {
@@ -168,11 +180,13 @@ describe("Mixer", function () {
 
     let depositor, withdrawer // wallets
     let contract;
-    const depositedCommitments = [];
 
+    let secret, nullifier;
+
+    const depositedCommitments = [];
     const receipts = [];
 
-    afterAll(async () =>{
+    afterAll(async () => {
         if (receipts.length === 0) return;
 
         console.log("\n=== Gas / ETH cost summary ===");
@@ -228,6 +242,15 @@ describe("Mixer", function () {
     });
 
     describe("Deposit", function () {
+
+        let commitment;
+
+        beforeAll(async () => {
+            secret = randomBigInt32ModP();
+            nullifier = randomBigInt32ModP();
+            commitment = poseidon2([secret, nullifier]);
+        })
+
         it("Should allow deposits of exactly 0.1 ETH", async function () {
             const { address, abi } = contract;
             const hash = await depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.1") });
@@ -241,11 +264,13 @@ describe("Mixer", function () {
             expect(eventName).to.equal('CommitmentDeposited');
             expect(args.commitment).to.equal(commitment);
         });
+
         it("Should not allow deposits of less than 0.1 ETH", async function () {
             const { address, abi } = contract;
             const request = depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.05") });
             await expect(request).rejects.toThrow("Must send exactly 0.1 ETH");
         });
+
         it("Should not allow deposits of more than 0.1 ETH", async function () {
             const { address, abi } = contract;
             const request = depositor.writeContract({ address, abi, functionName: "deposit", args: [commitment], value: parseEther("0.15") });
@@ -254,6 +279,30 @@ describe("Mixer", function () {
     });
 
     describe("Withdraw", function () {
+
+        let to, amount, nonce, tree;
+        let pi;
+
+        beforeAll(async () => {
+            to = withdrawer.account.address;
+            amount = parseEther("0.1");
+            nonce = randomBigInt32ModP();
+            tree = new IncrementalMerkleTree(poseidon2, TREE_DEPTH, BigInt(0), 2, depositedCommitments)
+            const commitment = poseidon2([secret, nullifier]);
+            const imtProof = tree.createProof(tree.indexOf(commitment));
+
+            // create the proof
+            const inputs = {
+                secret: secret,
+                siblings: imtProof.siblings,
+                pathIndices: imtProof.pathIndices,
+                nullifier: nullifier,
+                nonce: poseidon5([BigInt(foundry.id), BigInt(contract.address), BigInt(to), amount, nonce])
+            };
+            const { proof, publicSignals } = await groth16.fullProve(inputs, wasmFile, zkeyFile);
+            pi = { proof, publicSignals };
+        });
+      
         it("Should allow withdrawal", async function () {
             const { address, abi } = contract;
             const recipient = getAddress(withdrawer.account.address);
@@ -288,6 +337,7 @@ describe("Mixer", function () {
             const netReceived = after + gasCost - before;
             expect(netReceived).toBe(parseEther("0.1"));
         });
+
         it("Should not allow withdrawal with improper secret", async function () {
             const { address, abi } = contract;
             const recipient = getAddress(withdrawer.account.address);
@@ -312,6 +362,7 @@ describe("Mixer", function () {
             });
             await expect(request).rejects.toThrow("Proof verification failed");
         });
+
         it("Should not allow withdrawal to incorrect address", async function () {
             const { address, abi } = contract;
             const proofRecipient = getAddress(withdrawer.account.address);
@@ -337,6 +388,7 @@ describe("Mixer", function () {
             });
             await expect(request).rejects.toThrow("Recipient mismatch");
         });
+
         it("Should not allow withdrawal of duplicate nullifiers", async function () {
             const { address, abi } = contract;
             const recipient = getAddress(withdrawer.account.address);
