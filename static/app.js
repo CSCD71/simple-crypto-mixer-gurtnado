@@ -5,9 +5,75 @@ import {
   getAddress,
   parseAbiItem,
   parseEther,
+  encodeAbiParameters,
 } from "https://esm.sh/viem@2.19.4";
 import * as chains from "https://esm.sh/viem@2.19.4/chains";
-import { ProofOfMembership, randomBigInt32ModP, poseidon } from "https://esm.sh/@prifilabs/zk-toolbox";
+import { poseidon2, poseidon5 } from "https://esm.sh/poseidon-lite@0.3.0";
+import { IncrementalMerkleTree } from "https://esm.sh/@zk-kit/incremental-merkle-tree@1.1.0";
+
+// ---------------------------------------------------------------------------
+// ZK Utility functions (browser-compatible reimplementations of utils/utils.js)
+// ---------------------------------------------------------------------------
+const TREE_DEPTH = 20;
+const p = BigInt('21888242871839275222246405745257275088548364400416034343698204186575808495617');
+
+const wasmPath = "zk-data/ProofOfMembership_js/ProofOfMembership.wasm";
+const zkeyPath = "zk-data/ProofOfMembership.zkey";
+
+let vKeyCache = null;
+async function loadVKey() {
+  if (vKeyCache) return vKeyCache;
+  const response = await fetch("zk-data/ProofOfMembership.vkey", { cache: "no-store" });
+  if (!response.ok) throw new Error("Failed to load verification key");
+  vKeyCache = await response.json();
+  return vKeyCache;
+}
+
+function randomBigInt32ModP() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  return BigInt('0x' + hex) % p;
+}
+
+function generateMerkleProof(secret, nullifier, commitments) {
+  const tree = new IncrementalMerkleTree(poseidon2, TREE_DEPTH, BigInt(0), 2, commitments);
+  const commitment = poseidon2([secret, nullifier]);
+  const imtProof = tree.createProof(tree.indexOf(commitment));
+  return { imtProof };
+}
+
+async function generateZkProof(contractAddress, to, nonce, secret, nullifier, commitments, chainId) {
+  const { imtProof } = generateMerkleProof(secret, nullifier, commitments);
+  const zkNonce = poseidon5([BigInt(chainId), BigInt(contractAddress), BigInt(to), parseEther("0.1"), nonce]);
+  const inputs = {
+    secret: secret,
+    siblings: imtProof.siblings,
+    pathIndices: imtProof.pathIndices,
+    nullifier: nullifier,
+    nonce: zkNonce,
+  };
+  const { proof, publicSignals } = await window.snarkjs.groth16.fullProve(inputs, wasmPath, zkeyPath);
+  return { proof, publicSignals };
+}
+
+async function verifyZkProof(proof, publicSignals) {
+  const vKey = await loadVKey();
+  return window.snarkjs.groth16.verify(vKey, publicSignals, proof);
+}
+
+async function packProofArgs(proof, publicSignals) {
+  const proofCalldata = await window.snarkjs.groth16.exportSolidityCallData(proof, publicSignals);
+  const proofCalldataFormatted = JSON.parse("[" + proofCalldata + "]");
+  return encodeAbiParameters(
+    [
+      { type: 'uint256[2]' },
+      { type: 'uint256[2][2]' },
+      { type: 'uint256[2]' },
+      { type: 'uint256[4]' },
+    ],
+    proofCalldataFormatted
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Mixer contract ABI fragments
@@ -39,7 +105,7 @@ const ABI_WITHDRAW = [
 ];
 
 const ABI_COMMITMENT_EVENT = parseAbiItem(
-  "event CommitmentDeposited(bytes commitment)"
+  "event CommitmentDeposited(uint256 commitment)"
 );
 
 // ---------------------------------------------------------------------------
@@ -63,11 +129,6 @@ const depositMessage = document.getElementById("depositMessage");
 const depositSecret = document.getElementById("depositSecret");
 const depositNullifier = document.getElementById("depositNullifier");
 const depositCommitment = document.getElementById("depositCommitment");
-const generateSecretsBtn = document.getElementById("generateSecretsBtn");
-const secretNoteSection = document.getElementById("secretNoteSection");
-const secretNoteText = document.getElementById("secretNoteText");
-const copyNoteBtn = document.getElementById("copyNoteBtn");
-const downloadNoteBtn = document.getElementById("downloadNoteBtn");
 
 // withdraw UI
 const withdrawForm = document.getElementById("withdrawForm");
@@ -109,6 +170,34 @@ let currentChainId = null;
 let currentAccount = null;
 let currentExplorerBase = null;
 
+const ANIMATION_INTERVAL_MS = 450;
+
+function createDotsAnimator(updateFn) {
+  let timerId = null;
+  let dots = 1;
+
+  return {
+    start(baseText) {
+      this.stop();
+      dots = 1;
+      updateFn(`${baseText}${".".repeat(dots)}`);
+      timerId = setInterval(() => {
+        dots = dots % 3 + 1;
+        updateFn(`${baseText}${".".repeat(dots)}`);
+      }, ANIMATION_INTERVAL_MS);
+    },
+    stop() {
+      if (!timerId) return;
+      clearInterval(timerId);
+      timerId = null;
+    }
+  };
+}
+
+const depositMessageAnimator = createDotsAnimator((text) => setDepositMessage(text));
+const withdrawMessageAnimator = createDotsAnimator((text) => setWithdrawMessage(text));
+const proofStatusAnimator = createDotsAnimator((text) => setProofStatus(text, true));
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -129,6 +218,29 @@ function getUiErrorMessage(error) {
 function logDetailedError(context, error) {
   console.error(`[${context}]`, error);
   if (error?.message) console.error(`[${context}] full message:`, error.message);
+}
+
+function copyTextToClipboard(text, buttonElement, defaultLabel = "Copy to Clipboard", copiedLabel = "Copied!") {
+  const onCopied = () => {
+    if (!buttonElement) return;
+    buttonElement.textContent = copiedLabel;
+    setTimeout(() => { buttonElement.textContent = defaultLabel; }, 2000);
+  };
+
+  return navigator.clipboard.writeText(text)
+    .then(onCopied)
+    .catch(() => {
+      const fallback = document.createElement("textarea");
+      fallback.value = text;
+      fallback.style.position = "fixed";
+      fallback.style.opacity = "0";
+      document.body.appendChild(fallback);
+      fallback.focus();
+      fallback.select();
+      document.execCommand("copy");
+      document.body.removeChild(fallback);
+      onCopied();
+    });
 }
 
 function setDepositMessage(text, tone = "info") {
@@ -255,6 +367,96 @@ function ensureClients() {
 }
 
 // ---------------------------------------------------------------------------
+// Deposit helpers
+// ---------------------------------------------------------------------------
+function recomputeDepositCommitment() {
+  const secretVal = depositSecret?.value?.trim();
+  const nullifierVal = depositNullifier?.value?.trim();
+  if (!secretVal || !nullifierVal) {
+    if (depositCommitment) depositCommitment.value = "";
+    return;
+  }
+
+  try {
+    const commitment = poseidon2([BigInt(secretVal), BigInt(nullifierVal)]);
+    if (depositCommitment) depositCommitment.value = commitment.toString();
+  } catch {
+    if (depositCommitment) depositCommitment.value = "";
+  }
+}
+
+function insertInlineGenerateButton(targetInput, onGenerate) {
+  if (!targetInput || targetInput.dataset.hasGenerateBtn === "true") return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Generate";
+  button.className = "btn ghost inline-generate-btn";
+  button.addEventListener("click", onGenerate);
+  targetInput.insertAdjacentElement("afterend", button);
+  targetInput.dataset.hasGenerateBtn = "true";
+}
+
+function initializeDepositGenerators() {
+  insertInlineGenerateButton(depositSecret, () => {
+    depositSecret.value = randomBigInt32ModP().toString();
+    recomputeDepositCommitment();
+    setDepositMessage("Secret generated. Generate nullifier as well to produce commitment.");
+  });
+
+  insertInlineGenerateButton(depositNullifier, () => {
+    depositNullifier.value = randomBigInt32ModP().toString();
+    recomputeDepositCommitment();
+    setDepositMessage("Nullifier generated. Commitment updated.");
+  });
+
+  depositSecret?.addEventListener("input", recomputeDepositCommitment);
+  depositNullifier?.addEventListener("input", recomputeDepositCommitment);
+}
+
+function openDepositConfirmedModal(hash, noteJson) {
+  const explorer = currentExplorerBase;
+  const shortHash = `${hash.slice(0, 6)}...${hash.slice(-4)}`;
+  const txLink = explorer
+    ? `<a href="${explorer}/tx/${hash}" target="_blank" rel="noreferrer">${shortHash}</a>`
+    : shortHash;
+
+  txBody.innerHTML = `
+    <p>Deposit of 0.1 ETH confirmed!</p>
+    <p>Tx: ${txLink}</p>
+    <p><strong>Save your secret note before closing this modal.</strong></p>
+    <textarea id="modalSecretNoteText" rows="8" class="secret-note-textarea" readonly></textarea>
+    <div class="modal-note-actions">
+      <button id="modalCopyNoteBtn" type="button" class="btn ghost modal-note-btn">Copy to Clipboard</button>
+      <button id="modalDownloadNoteBtn" type="button" class="btn ghost modal-note-btn">Download Note</button>
+    </div>
+  `;
+
+  const modalSecretNoteText = document.getElementById("modalSecretNoteText");
+  const modalCopyNoteBtn = document.getElementById("modalCopyNoteBtn");
+  const modalDownloadNoteBtn = document.getElementById("modalDownloadNoteBtn");
+
+  if (modalSecretNoteText) modalSecretNoteText.value = noteJson;
+
+  modalCopyNoteBtn?.addEventListener("click", () => {
+    copyTextToClipboard(noteJson, modalCopyNoteBtn);
+  });
+
+  modalDownloadNoteBtn?.addEventListener("click", () => {
+    const blob = new Blob([noteJson], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `GurtNado-Mixer-note-${Date.now()}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  });
+
+  txModal.hidden = false;
+}
+
+// ---------------------------------------------------------------------------
 // Gas estimation helper
 // ---------------------------------------------------------------------------
 async function estimateGasForContract({ address, abi, functionName, args = [], value }) {
@@ -291,7 +493,7 @@ async function fetchCommitments(contractAddress, fromBlock) {
     fromBlock: BigInt(fromBlock),
     toBlock: "latest"
   });
-  // Each log.args.commitment is a bytes-encoded uint256 commitment
+  // Each log.args.commitment is a uint256 commitment
   return logs.map((log) => BigInt(log.args.commitment));
 }
 
@@ -330,7 +532,7 @@ async function connectWallet() {
 
     const chainConfig = configCache[String(chainId)];
     if (!chainConfig || !chainConfig.address) {
-      setDepositMessage("Mixer contract not deployed on this chain.");
+      setDepositMessage("GurtNado Mixer contract not deployed on this chain.");
       contractLink.hidden = true;
       isConnected = true;
       connectButton.textContent = "Disconnect Wallet";
@@ -339,7 +541,7 @@ async function connectWallet() {
     }
 
     updateContractLink(chainId, chainConfig.address);
-    setDepositMessage("Ready. Generate secrets to deposit 0.1 ETH into the mixer.");
+    setDepositMessage("Ready. Generate secrets to deposit 0.1 ETH into the GurtNado mixer.");
     isConnected = true;
     connectButton.textContent = "Disconnect Wallet";
     setWalletUiState(true);
@@ -352,28 +554,11 @@ async function connectWallet() {
 }
 
 // ---------------------------------------------------------------------------
-// Generate secrets for deposit
-// ---------------------------------------------------------------------------
-generateSecretsBtn?.addEventListener("click", () => {
-  const secret = randomBigInt32ModP();
-  const nullifier = randomBigInt32ModP();
-  const commitment = poseidon([secret, nullifier]);
-
-  depositSecret.value = secret.toString();
-  depositNullifier.value = nullifier.toString();
-  depositCommitment.value = commitment.toString();
-
-  // hide previous note
-  secretNoteSection.hidden = true;
-  secretNoteText.value = "";
-  setDepositMessage("Secrets generated. Review and click Deposit to send 0.1 ETH.");
-});
-
-// ---------------------------------------------------------------------------
 // Deposit form submission
 // ---------------------------------------------------------------------------
 depositForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
+  depositMessageAnimator.stop();
 
   if (!isConnected || !configCache || !currentChainId || !currentAccount) {
     setDepositMessage("Connect your wallet first.");
@@ -382,7 +567,7 @@ depositForm?.addEventListener("submit", async (event) => {
 
   const chainConfig = configCache[String(currentChainId)];
   if (!chainConfig || !chainConfig.address) {
-    setDepositMessage("Mixer contract not deployed on this chain.");
+    setDepositMessage("GurtNado Mixer contract not deployed on this chain.");
     return;
   }
 
@@ -418,26 +603,18 @@ depositForm?.addEventListener("submit", async (event) => {
       })
     });
 
-    setDepositMessage("Transaction sent. Waiting for confirmation...");
+    depositMessageAnimator.start("Transaction sent. Waiting for confirmation");
     await publicClient.waitForTransactionReceipt({ hash });
+    depositMessageAnimator.stop();
 
-    // Build and show the secret note
+    // Build and show the secret note inside the confirmation modal
     const note = {
       secret: secretVal,
       nullifier: nullifierVal,
       commitment: commitmentVal
     };
     const noteJson = JSON.stringify(note, null, 2);
-    secretNoteText.value = noteJson;
-    secretNoteSection.hidden = false;
-
-    const explorer = currentExplorerBase;
-    const shortHash = `${hash.slice(0, 6)}...${hash.slice(-4)}`;
-    const linkHtml = explorer
-      ? `<a href="${explorer}/tx/${hash}" target="_blank" rel="noreferrer">${shortHash}</a>`
-      : shortHash;
-    txBody.innerHTML = `Deposit of 0.1 ETH confirmed!<br/>Tx: ${linkHtml}<br/><br/><strong>Save your secret note below before closing this page.</strong>`;
-    txModal.hidden = false;
+    openDepositConfirmedModal(hash, noteJson);
 
     setDepositMessage("Deposit confirmed! Save your secret note securely.");
 
@@ -446,38 +623,12 @@ depositForm?.addEventListener("submit", async (event) => {
     depositNullifier.value = "";
     depositCommitment.value = "";
   } catch (error) {
+    depositMessageAnimator.stop();
     logDetailedError("deposit", error);
     setDepositMessage(`Error: ${getUiErrorMessage(error)}`);
+  } finally {
+    depositMessageAnimator.stop();
   }
-});
-
-// ---------------------------------------------------------------------------
-// Copy / download note helpers
-// ---------------------------------------------------------------------------
-copyNoteBtn?.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(secretNoteText.value);
-    copyNoteBtn.textContent = "Copied!";
-    setTimeout(() => { copyNoteBtn.textContent = "Copy to Clipboard"; }, 2000);
-  } catch (_) {
-    // fallback
-    secretNoteText.select();
-    document.execCommand("copy");
-    copyNoteBtn.textContent = "Copied!";
-    setTimeout(() => { copyNoteBtn.textContent = "Copy to Clipboard"; }, 2000);
-  }
-});
-
-downloadNoteBtn?.addEventListener("click", () => {
-  const blob = new Blob([secretNoteText.value], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `mixer-note-${Date.now()}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 });
 
 // ---------------------------------------------------------------------------
@@ -508,6 +659,8 @@ parseNoteBtn?.addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 withdrawForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
+  withdrawMessageAnimator.stop();
+  proofStatusAnimator.stop();
 
   if (!isConnected || !configCache || !currentChainId || !currentAccount) {
     setWithdrawMessage("Connect your wallet first.");
@@ -516,7 +669,7 @@ withdrawForm?.addEventListener("submit", async (event) => {
 
   const chainConfig = configCache[String(currentChainId)];
   if (!chainConfig || !chainConfig.address) {
-    setWithdrawMessage("Mixer contract not deployed on this chain.");
+    setWithdrawMessage("GurtNado Mixer contract not deployed on this chain.");
     return;
   }
 
@@ -539,58 +692,63 @@ withdrawForm?.addEventListener("submit", async (event) => {
     const recipient = getAddress(recipientVal);
 
     // Step 1: Fetch all on-chain commitments to build the Merkle tree
-    setWithdrawMessage("Fetching on-chain commitments...");
-    setProofStatus("Loading commitments from blockchain...", true);
+    withdrawMessageAnimator.start("Fetching on-chain commitments");
+    proofStatusAnimator.start("Loading commitments from blockchain");
 
     const deploymentBlock = await resolveDeploymentBlock(chainConfig);
     const commitments = await fetchCommitments(chainConfig.address, deploymentBlock);
+    withdrawMessageAnimator.stop();
 
     if (!commitments.length) {
       setWithdrawMessage("No commitments found on-chain. Has anyone deposited?");
+      proofStatusAnimator.stop();
       setProofStatus("", false);
       return;
     }
 
     // Verify our commitment exists in the list
-    const ourCommitment = poseidon([secret, nullifier]);
+    const ourCommitment = poseidon2([secret, nullifier]);
     const commitmentIndex = commitments.findIndex((c) => c === ourCommitment);
     if (commitmentIndex === -1) {
       setWithdrawMessage("Your commitment was not found on-chain. Check your secret and nullifier.");
+      proofStatusAnimator.stop();
       setProofStatus("", false);
       return;
     }
 
     // Step 2: Generate a random nonce (for context binding)
-    setWithdrawMessage("Generating ZK proof... this may take a moment.");
-    setProofStatus("Generating zero-knowledge proof...", true);
+    withdrawMessageAnimator.start("Generating ZK proof, this may take a moment");
+    proofStatusAnimator.start("Building Merkle tree and generating Groth16 proof");
 
     const nonce = randomBigInt32ModP();
 
-    // Step 3: Generate the proof using the zk-toolbox library (similar to pom-example.js)
-    const privateInputs = { secret };
-    const publicInputs = { commitments, nullifier, nonce };
+    // Step 3: Generate the proof using snarkjs + local Merkle tree (browser-compatible)
+    const { proof, publicSignals } = await generateZkProof(
+      chainConfig.address,
+      recipient,
+      nonce,
+      secret,
+      nullifier,
+      commitments,
+      currentChainId
+    );
+    withdrawMessageAnimator.stop();
 
-    const proofOfMembership = new ProofOfMembership();
-    const { proof, publicOutputs } = await proofOfMembership.generate(privateInputs, publicInputs);
-
-    // Step 3.5: Verify the output locally (sanity check)
-    const expectedAuthHash = poseidon([secret, nullifier, nonce]);
-    if (publicOutputs.authHash !== expectedAuthHash) {
-      console.warn("authHash mismatch – proof may fail on-chain");
-    }
-
-    // Optionally verify the proof locally
-    const verified = await proofOfMembership.verify(proof, publicInputs, publicOutputs);
+    // Step 3.5: Verify the proof locally (optional sanity check)
+    proofStatusAnimator.start("Verifying proof locally");
+    const verified = await verifyZkProof(proof, publicSignals);
+    proofStatusAnimator.stop();
     if (!verified) {
       setWithdrawMessage("Local proof verification failed. Please try again.");
       setProofStatus("", false);
       return;
     }
 
-    setProofStatus("Proof generated and verified locally. Submitting transaction...", true);
-    setWithdrawMessage("Submitting withdraw transaction...");
+    proofStatusAnimator.start("Proof generated and verified locally. Submitting transaction");
+    withdrawMessageAnimator.start("Submitting withdraw transaction");
 
-    // Step 4: Submit the withdraw transaction
+    // Step 4: Encode the proof for the Solidity verifier and submit
+    const proofBytes = await packProofArgs(proof, publicSignals);
     const chain = getChainById(currentChainId);
 
     const hash = await walletClient.writeContract({
@@ -598,18 +756,20 @@ withdrawForm?.addEventListener("submit", async (event) => {
       address: getAddress(chainConfig.address),
       abi: ABI_WITHDRAW,
       functionName: "withdraw",
-      args: [proof, recipient, nonce],
+      args: [proofBytes, recipient, nonce],
       chain: chain ?? undefined,
       gas: await estimateGasForContract({
         address: chainConfig.address,
         abi: ABI_WITHDRAW,
         functionName: "withdraw",
-        args: [proof, recipient, nonce]
+        args: [proofBytes, recipient, nonce]
       })
     });
+    proofStatusAnimator.stop();
 
-    setWithdrawMessage("Transaction sent. Waiting for confirmation...");
+    withdrawMessageAnimator.start("Transaction sent. Waiting for confirmation");
     await publicClient.waitForTransactionReceipt({ hash });
+    withdrawMessageAnimator.stop();
 
     const explorer = currentExplorerBase;
     const shortHash = `${hash.slice(0, 6)}...${hash.slice(-4)}`;
@@ -620,14 +780,20 @@ withdrawForm?.addEventListener("submit", async (event) => {
     txModal.hidden = false;
 
     setWithdrawMessage("Withdrawal confirmed! 0.1 ETH sent to the recipient.");
+    proofStatusAnimator.stop();
     setProofStatus("", false);
 
     // Clear form
     withdrawForm.reset();
   } catch (error) {
+    withdrawMessageAnimator.stop();
+    proofStatusAnimator.stop();
     logDetailedError("withdraw", error);
     setWithdrawMessage(`Error: ${getUiErrorMessage(error)}`);
     setProofStatus("", false);
+  } finally {
+    withdrawMessageAnimator.stop();
+    proofStatusAnimator.stop();
   }
 });
 
@@ -691,5 +857,6 @@ if (window.ethereum) {
 // ---------------------------------------------------------------------------
 txModal.hidden = true;
 initializeTabs();
+initializeDepositGenerators();
 initNetworks();
 resetUi();

@@ -3,7 +3,7 @@ pragma solidity ^0.8.32;
 
 import { PoseidonT6 } from "poseidon-solidity/PoseidonT6.sol";
 import { ProofOfMembershipVerifier } from "./ProofOfMembershipVerifier.sol";
-import "@zk-kit/incremental-merkle-tree.sol/IncrementalBinaryTree.sol";
+import { IncrementalBinaryTree, IncrementalTreeData } from "./IncrementalBinaryTree.sol";
 
 contract Mixer {
     using IncrementalBinaryTree for IncrementalTreeData;
@@ -12,17 +12,17 @@ contract Mixer {
 
     IncrementalTreeData public tree;
 
+    mapping(uint256 => bool) hashes;
     mapping(uint256 => bool) nullifiers;
-    mapping(uint256 => bool) nonces;
 
     // Emitted when a commitment is deposited to the contract
     event CommitmentDeposited(
-      bytes commitment
+      uint256 commitment
     );
 	
     constructor(ProofOfMembershipVerifier _verifier) {
 		    VERIFIER = _verifier;
-        tree.init(1, 0); // init 1 deep. will tree.insert() increase depth?
+        tree.init(20, 0); // init 1 deep. will tree.insert() increase depth?
     }
 
     // https://www.npmjs.com/package/@zk-kit/incremental-merkle-tree.sol
@@ -30,10 +30,13 @@ contract Mixer {
         tree.insert(_leaf);
     }
 
+    function isUsed(uint256 nullifier) public view returns(bool) {
+        return nullifiers[nullifier];
+    }
+
     function deposit(uint256 commitment) payable public {
-        // note: check that 0.1 ETH was sent?
         require(msg.value == 0.1 ether, "Must send exactly 0.1 ETH");
-        emit CommitmentDeposited(bytes32(commitment));
+        emit CommitmentDeposited(commitment);
         insertLeaf(commitment);
     }
 
@@ -42,18 +45,34 @@ contract Mixer {
             uint256(block.chainid),           // to prevent reuse across multiple chains
             uint256(uint160(address(this))),  // to prevent reused with another contract
             uint256(uint160(address(to))),
-            100000,
+            0.1 ether,
             nonce
         ]);
     }
 
     function withdraw(bytes calldata proof, address payable to, uint256 nonce) public {
         // unwrap the proof (to extract signals)
+        ( uint256[2] memory pia, uint256[2][2] memory pib, uint256[2] memory pic, uint256[4] memory signals)
+            = abi.decode(proof, (uint256[2], uint256[2][2], uint256[2], uint256[4]));
         // check the proof
+        (bool valid, ) = address(VERIFIER).staticcall(abi.encodeWithSelector(ProofOfMembershipVerifier.verifyProof.selector, pia, pib, pic, signals));
+        require(valid, "Proof verification failed");
         // extract data from signals
-        // check and update nullifier reuse
+        uint256 hash = signals[3];
+        uint256 nullifier = signals[2];
+        uint256 root = signals[0];
+        // check root
+        require(root == tree.root, "Invalid Merkle tree root");
         // check hash
-        // check and update nonce reuse
+        require(hash == getHash(to, nonce), "Invalid zkNonce");
+        // check and update nullifier reuse
+        require(!nullifiers[nullifier], "Nullifier already used");
+        nullifiers[nullifier] = true;
+        // check and update hash reuse
+        require(!hashes[hash], "Nonce already used");
+        hashes[hash] = true;
         // transfer 0.1 ETH
+        (bool sent, ) = to.call{value: 0.1 ether}("");
+        require(sent, "Failed to send Ether");
     }
 }
