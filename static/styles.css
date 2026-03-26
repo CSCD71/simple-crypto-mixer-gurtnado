@@ -239,6 +239,23 @@ body {
   font-size: 14px;
 }
 
+.field-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.field-inline-input {
+  flex: 1;
+}
+
+.inline-generate-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
 .form-actions {
   display: flex;
   justify-content: flex-end;
@@ -397,6 +414,31 @@ body {
 
 .modal-body a {
   color: var(--accent);
+}
+
+.secret-note-textarea {
+  width: 100%;
+  margin-top: 8px;
+  background: #0f131c;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: monospace;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.modal-note-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.modal-note-btn {
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
 }
 
 /* Tab Navigation System */
