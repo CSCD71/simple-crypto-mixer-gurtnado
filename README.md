@@ -6,7 +6,7 @@ https://cscd71.github.io/simple-crypto-mixer-gurtnado/
 
 ## Link to Deployed Smart Contract
 
-https://sepolia.etherscan.io/address/0xED4671fDEF0034F52830182870731BCa1B0f0ca2
+https://sepolia.etherscan.io/address/0xCc552E811300F4257bf8b765f906233D4Bda453D
 
 ## Deploying on a Local Development Chain
 
