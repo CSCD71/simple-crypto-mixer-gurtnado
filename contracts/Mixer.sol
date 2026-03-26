@@ -12,8 +12,8 @@ contract Mixer {
 
     IncrementalTreeData public tree;
 
+    mapping(uint256 => bool) hashes;
     mapping(uint256 => bool) nullifiers;
-    mapping(uint256 => bool) nonces;
 
     // Emitted when a commitment is deposited to the contract
     event CommitmentDeposited(
@@ -68,9 +68,9 @@ contract Mixer {
         // check and update nullifier reuse
         require(!nullifiers[nullifier], "Nullifier already used");
         nullifiers[nullifier] = true;
-        // check and update nonce reuse [is this done?]
-        require(!nonces[nonce], "Nonce already used");
-        nonces[nonce] = true;
+        // check and update hash reuse
+        require(!hashes[hash], "Nonce already used");
+        hashes[hash] = true;
         // transfer 0.1 ETH
         (bool sent, ) = to.call{value: 0.1 ether}("");
         require(sent, "Failed to send Ether");
