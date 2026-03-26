@@ -91,7 +91,7 @@ describe("Mixer", function () {
             await client.waitForTransactionReceipt({ hash: hash2 });
         }
 
-       // Deploy Poseidon T3 contract if needed
+        // Deploy Poseidon T3 contract if needed
         const hasherCode2 = await client.getBytecode({ address: PoseidonT3.address })
         if (!hasherCode2) {
             const hash3 = await depositor.sendTransaction({to: proxy.address, data: PoseidonT3.data})
@@ -161,11 +161,11 @@ describe("Mixer", function () {
             nonce = randomBigInt32ModP();
             root = generateMerkleProof(secret, nullifier, depositedCommitments).imtProof.root;
 
-            // generate proof
+            // Generate proof
             const { proof, publicSignals } = await generateZkProof(contract.address, to, nonce, secret, nullifier, depositedCommitments);
             pi = { proof, publicSignals };
         });
-      
+
         it("Should verify the public signals", async function () {
             const { publicSignals } = pi;
             const zkNonce = await client.readContract({ ...contract, functionName: "getHash", args: [withdrawer.account.address, nonce] });
@@ -186,30 +186,23 @@ describe("Mixer", function () {
             expect(res).to.be.true;
         });
 
-        // note: doesn't trigger correct error message; either reverts contract call, or goes to "Invalid Merkle tree root" message
-        // it("Should not allow withdrawal with bad proof", async function () {
-        //     const badProof = "0x676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767"
-        //     const request = withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [badProof, to, nonce] });
-        //     await expect(request).rejects.toThrow("Proof verification failed");
-        // });
-
         it("Should not allow withdrawal to incorrect address", async function () {
-            // pack arguments
+            // Pack arguments
             const { proof, publicSignals } = pi
             const proofCalldataEncoded = await packProofArgs(proof, publicSignals);
 
-            // call the contract
+            // Call the contract
             const thief = depositor.account.address;
             const request = withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [proofCalldataEncoded, thief, nonce] });
             await expect(request).rejects.toThrow("Invalid zkNonce");
         });
 
         it("Should allow withdrawal and transfer funds", async function () {
-            // pack arguments
+            // Pack arguments
             const { proof, publicSignals } = pi;
             const proofCalldataEncoded = await packProofArgs(proof, publicSignals);
 
-            // call the contract (success)
+            // Call the contract (success)
             const hash = await withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [proofCalldataEncoded, to, nonce] });
             const receipt = await client.waitForTransactionReceipt({ hash });
             receipts.push({label: "Withdraw", receipt});
@@ -218,11 +211,11 @@ describe("Mixer", function () {
         });
 
         it("Should not allow withdrawal of duplicate nullifiers", async function () {
-            // pack arguments
+            // Pack arguments
             const { proof, publicSignals } = pi;
             const proofCalldataEncoded = await packProofArgs(proof, publicSignals);
 
-            // call the contract
+            // Call the contract
             const request = withdrawer.writeContract({ ...contract, functionName: "withdraw", args: [proofCalldataEncoded, to, nonce] });
             await expect(request).rejects.toThrow("Nullifier already used");
         });
